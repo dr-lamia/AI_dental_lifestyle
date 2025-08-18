@@ -5,10 +5,28 @@ import pandas as pd
 import streamlit as st
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score, mean_absolute_error
+
+from sklearn.preprocessing import OneHotEncoder
+
+def make_ohe():
+    # Newer scikit-learn (>=1.2) uses 'sparse_output'
+    try:
+        return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+    except TypeError:
+        # Older versions use 'sparse'
+        return OneHotEncoder(handle_unknown="ignore", sparse=False)
+
+from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
-from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import OneHotEncoder
+
+pre = ColumnTransformer([
+    ("num", SimpleImputer(strategy="median"), num_cols),
+    ("cat", make_ohe(), cat_cols)
+], remainder="drop", verbose_feature_names_out=True)
+
+pipe = Pipeline([("pre", pre), ("reg", reg)])
+
 from sklearn.ensemble import RandomForestRegressor
 import shap
 import matplotlib.pyplot as plt
