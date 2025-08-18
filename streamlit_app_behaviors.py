@@ -11,6 +11,8 @@ from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.inspection import permutation_importance, PartialDependenceDisplay
+
 
 # ============================ CONFIG =============================
 st.set_page_config(page_title="Elham AI · Behaviors + Explainability",
@@ -375,11 +377,188 @@ def ordered_options(col, cat_values, current):
     return opts
 
 # =============================== UI ===============================
-st.title("🦷 Elham AI: Behaviors → Explainable Index + Advice")
+st.title("🦷 Dental AI Lifestyle: Behaviors → Explainable Index + Advice")
 
 df = load_data(DATA_PATH)
 pipe, metrics, num_cols, cat_cols, feat_names, num_medians, cat_modes, cat_values, risk_bins = train_model(df)
 st.success(f"Model ready · R² = {metrics['R2']:.3f} · MAE = {metrics['MAE']:.2f}")
+# ========================= MODEL VISUALIZATIONS =========================
+st.subheader("Model visualizations")
+
+# Reconstruct the same train/test split (same random_state)
+X_all = df[num_cols + cat_cols].copy()
+y_all = df[TARGET_COL].astype(float).values
+X_tr_v, X_te_v, y_tr_v, y_te_v = train_test_split(
+    X_all, y_all, test_size=0.2, random_state=42
+)
+y_pred_v = pipe.predict(X_te_v)
+resid_v = y_te_v - y_pred_v
+
+# Pre-compute permutation importance ONCE (reused in tabs)
+base_names = num_cols + cat_cols
+pi = permutation_importance(pipe, X_te_v, y_te_v, n_repeats=15, random_state=42, scoring="r2")
+pi_map = {name: float(val) for name, val in zip(base_names, pi.importances_mean)}
+pi_num_map = {name: pi_map.get(name, 0.0) for name in num_cols}
+
+# Helper: safe PDP (fallback if PartialDependenceDisplay fails with pipelines)
+def manual_pdp(pipe, X_df, feature, q_low=0.05, q_high=0.95, grid=20):
+    """Average prediction while sweeping one numeric feature from q_low..q_high."""
+    vals = np.linspace(float(X_df[feature].quantile(q_low)),
+                       float(X_df[feature].quantile(q_high)), grid)
+    means = []
+    for v in vals:
+        X_tmp = X_df.copy()
+        X_tmp[feature] = v
+        means.append(float(pipe.predict(X_tmp).mean()))
+    return vals, means
+
+tab_perf, tab_imp, tab_beh, tab_pdp = st.tabs(["📈 Performance", "⭐ Global importance", "🧠 Behaviour effects", "🧩 PDP / ICE"])
+
+# ---------- 📈 Performance ----------
+with tab_perf:
+    import matplotlib.pyplot as plt
+
+    # Predicted vs Actual
+    fig1, ax1 = plt.subplots()
+    ax1.scatter(y_te_v, y_pred_v, alpha=0.65)
+    lo = float(min(y_te_v.min(), y_pred_v.min()))
+    hi = float(max(y_te_v.max(), y_pred_v.max()))
+    ax1.plot([lo, hi], [lo, hi])
+    ax1.set_xlabel("Actual Elham Index")
+    ax1.set_ylabel("Predicted Elham Index")
+    ax1.set_title("Predicted vs Actual (hold-out)")
+    fig1.tight_layout()
+    st.pyplot(fig1)
+
+    # Residuals histogram
+    fig2, ax2 = plt.subplots()
+    ax2.hist(resid_v, bins=30)
+    ax2.set_xlabel("Residual (Actual − Predicted)")
+    ax2.set_title("Residuals (hold-out)")
+    fig2.tight_layout()
+    st.pyplot(fig2)
+
+    # Residuals vs Prediction
+    fig3, ax3 = plt.subplots()
+    ax3.scatter(y_pred_v, resid_v, alpha=0.6)
+    ax3.axhline(0, linestyle="--")
+    ax3.set_xlabel("Predicted")
+    ax3.set_ylabel("Residual")
+    ax3.set_title("Residuals vs Predicted (hold-out)")
+    fig3.tight_layout()
+    st.pyplot(fig3)
+
+# ---------- ⭐ Global importance ----------
+with tab_imp:
+    # 1) Permutation Importance (top 20)
+    st.markdown("**Permutation importance (R² drop on hold-out)**")
+    pi_items = sorted(pi_map.items(), key=lambda kv: kv[1], reverse=True)[:20]
+
+    fig4, ax4 = plt.subplots()
+    ax4.bar([k for k, _ in pi_items], [v for _, v in pi_items])
+    ax4.set_xticklabels([k for k, _ in pi_items], rotation=45, ha="right")
+    ax4.set_ylabel("Importance (mean R² drop)")
+    ax4.set_title("Permutation importance (top 20)")
+    fig4.tight_layout()
+    st.pyplot(fig4)
+
+    # 2) Tree feature_importances_ grouped back to original names
+    try:
+        reg = pipe.named_steps["reg"]
+        pre = pipe.named_steps["pre"]
+        trans_names = pre.get_feature_names_out().tolist()
+
+        def _group_tree_importances(trans_names, num_cols, cat_cols, importances):
+            grouped = {}
+            for i, name in enumerate(trans_names):
+                if name.startswith("num__"):
+                    orig = name[len("num__"):]
+                elif name.startswith("cat__"):
+                    orig = None
+                    for c in cat_cols:
+                        pref = f"cat__{c}_"
+                        if name.startswith(pref):
+                            orig = c; break
+                    if orig is None:
+                        orig = name
+                else:
+                    orig = name
+                grouped.setdefault(orig, 0.0)
+                grouped[orig] += float(importances[i])
+            return sorted(grouped.items(), key=lambda kv: kv[1], reverse=True)
+
+        gitems = _group_tree_importances(trans_names, num_cols, cat_cols, reg.feature_importances_)[:20]
+        st.markdown("**RandomForest feature_importances_ (grouped to original columns)**")
+        fig5, ax5 = plt.subplots()
+        ax5.bar([k for k, _ in gitems], [v for _, v in gitems])
+        ax5.set_xticklabels([k for k, _ in gitems], rotation=45, ha="right")
+        ax5.set_ylabel("Grouped importance (sum)")
+        ax5.set_title("Model internal importances (top 20)")
+        fig5.tight_layout()
+        st.pyplot(fig5)
+    except Exception as e:
+        st.info(f"Tree importances not available: {e}")
+
+# ---------- 🧠 Behaviour effects ----------
+with tab_beh:
+    st.caption("Pick a behaviour to see average predicted index by category (on the hold-out set).")
+    if len(cat_cols) == 0:
+        st.info("No behaviour (categorical) columns detected.")
+    else:
+        beh_choice = st.selectbox("Behaviour", options=cat_cols)
+        if beh_choice not in X_te_v.columns:
+            st.info("Selected behaviour not found in the hold-out set.")
+        else:
+            preds_te = pipe.predict(X_te_v)
+            df_te = X_te_v.copy()
+            df_te["_yhat_"] = preds_te
+            levels = df_te[beh_choice].astype(str).value_counts().head(10).index.tolist()
+            means = []
+            for lv in levels:
+                m = float(df_te.loc[df_te[beh_choice].astype(str) == lv, "_yhat_"].mean())
+                if not np.isnan(m):
+                    means.append((lv, m))
+            means = sorted(means, key=lambda kv: kv[1], reverse=True)
+
+            fig6, ax6 = plt.subplots()
+            ax6.bar([k for k, _ in means], [v for _, v in means])
+            ax6.set_xticklabels([k for k, _ in means], rotation=45, ha="right")
+            ax6.set_ylabel("Mean predicted index")
+            ax6.set_title(f"{beh_choice}: mean predicted index by category (hold-out)")
+            fig6.tight_layout()
+            st.pyplot(fig6)
+            st.write("**Levels shown (top by frequency):**", ", ".join(levels))
+
+# ---------- 🧩 PDP / ICE ----------
+with tab_pdp:
+    st.caption("Partial dependence (PDP) shows the average effect of a numeric feature on the prediction. ICE shows example individual curves.")
+    if len(num_cols) == 0:
+        st.info("No numeric features found for PDP.")
+    else:
+        # Choose top 3 numeric by permutation importance
+        top_num = sorted(num_cols, key=lambda c: pi_num_map.get(c, 0.0), reverse=True)[:3]
+        pick = st.selectbox("Numeric feature", options=top_num if any(pi_num_map.values()) else num_cols)
+
+        try:
+            # Built-in PDP/ICE (works in most sklearn versions with pipelines)
+            fig7, ax7 = plt.subplots()
+            PartialDependenceDisplay.from_estimator(
+                pipe, X_all, features=[pick], kind="both", grid_resolution=20, ax=ax7
+            )
+            ax7.set_title(f"PDP / ICE · {pick}")
+            fig7.tight_layout()
+            st.pyplot(fig7)
+        except Exception as e:
+            # Fallback: manual average sweep
+            st.info(f"Using manual PDP fallback for '{pick}' ({e}).")
+            xs, ys = manual_pdp(pipe, X_te_v, pick, q_low=0.05, q_high=0.95, grid=25)
+            fig8, ax8 = plt.subplots()
+            ax8.plot(xs, ys)
+            ax8.set_xlabel(pick)
+            ax8.set_ylabel("Mean predicted Elham index")
+            ax8.set_title(f"Manual PDP (average effect) · {pick}")
+            fig8.tight_layout()
+            st.pyplot(fig8)
 
 with st.expander("See features used for training & current selections"):
     st.caption(f"Numeric features ({len(num_cols)}): {', '.join(num_cols[:30])}{' ...' if len(num_cols)>30 else ''}")
