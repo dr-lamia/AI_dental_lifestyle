@@ -1,5 +1,8 @@
-scikit-learn==1.4.2
-shap==0.44.1
-xgboost==2.0.3
-numpy>=1.26
+streamlit
+pandas
+numpy
+scikit-learn
+matplotlib
+shap
+xgboost
 
