@@ -1,0 +1,9 @@
+﻿# Python / Streamlit noise
+__pycache__/
+.streamlit/
+models/
+
+# Ignore all data by default, allow specific files:
+data/*
+!data/README.md
+!data/no_recommendation_dental_dataset_cleaned_keep_including_wisdom.csv
