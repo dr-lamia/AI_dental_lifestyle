@@ -3,7 +3,6 @@ import os, io
 import numpy as np
 import pandas as pd
 import streamlit as st
-from joblib import dump, load
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score, mean_absolute_error
 from sklearn.impute import SimpleImputer
