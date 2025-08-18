@@ -193,10 +193,6 @@ def train_model(df: pd.DataFrame):
 
 # ======== SHAP GROUPING + SMALL PLOTTING HELPERS ==================
 def build_group_map(feature_names, num_cols, cat_cols):
-    """
-    Map transformed feature indices back to original column names.
-    Works with ColumnTransformer prefixes: 'num__' and 'cat__<col>_'.
-    """
     group_map = {}
     for i, name in enumerate(feature_names):
         if name.startswith("num__"):
@@ -334,7 +330,14 @@ def lines_for_behavior(name, val, tier):
     return [x for x in out if x]
 
 def detailed_behavior_recommendations(all_behaviors: dict, tier: str):
-    header = tiered_plan_header(tier)
+    header = [
+        f"**Overall plan for {tier.title()} risk:**",
+        f"- Recall: **{tier_plan(tier)['recall']}**",
+        f"- Toothpaste: **{tier_plan(tier)['toothpaste']}**",
+        f"- Mouthrinse: **{tier_plan(tier)['rinse']}**",
+        f"- Varnish: **{tier_plan(tier)['varnish']}**",
+        f"- Diet focus: **{tier_plan(tier)['diet_focus']}**",
+    ]
     recs, seen = header[:], set()
     for name, val in all_behaviors.items():
         for line in lines_for_behavior(name, val, tier):
@@ -342,6 +345,34 @@ def detailed_behavior_recommendations(all_behaviors: dict, tier: str):
                 recs.append(f"- {line}")
                 seen.add(line)
     return recs
+
+# =============== ORDERED OPTIONS FOR WHAT-IF SLIDERS ==============
+ORDERED_CHOICES = {
+    "tooth_brushing_frequency": ["Irregular","1/day","2/day"],
+    "interdental_cleaning": ["No","Yes"],
+    "mouth_rinse": ["No","Yes"],
+    "snacks_frequency": ["0/day","1–2/day","3+/day"],
+    "sugar": ["None","Occasional","Frequent"],
+    "carbonated_beverages": ["None","Occasional","Frequent"],
+    "sticky_food": ["No","Yes"],
+    "hydration": ["Low","Normal","High"],
+    "salivary_ph": ["Low","Normal","High"],
+    "salivary_consistency": ["Low","Normal","High"],
+    "buffering_capacity": ["Low","Moderate","Normal","High"],
+    "mutans_load_in_saliva": ["Low","Normal","High"],
+    "lactobacilli_load_in_saliva": ["Low","Normal","High"],
+    # type_of_diet & snack_content vary a lot → we’ll use dataset values
+}
+
+def ordered_options(col, cat_values, current):
+    """Return an ordered list for a behaviour, ensuring current value exists."""
+    if col in ORDERED_CHOICES:
+        opts = ORDERED_CHOICES[col][:]
+    else:
+        opts = cat_values.get(col, [])
+    if current not in opts:
+        opts = [current] + [o for o in opts if o != current]
+    return opts
 
 # =============================== UI ===============================
 st.title("🦷 Elham AI: Behaviors → Explainable Index + Advice")
@@ -393,13 +424,51 @@ if st.button("Predict + Explain"):
         X_row[c] = beh_vals.get(c, cat_modes.get(c, "Unknown"))
     X_df = normalize_cats(pd.DataFrame([X_row]))
 
-    # Predict
+    # Baseline prediction
     y_hat = float(pipe.predict(X_df)[0])
     st.success(f"Predicted Elham’s Index (including wisdom): **{y_hat:.2f}**")
     tier = index_tier(y_hat, risk_bins)
     st.info(f"Risk tier based on predicted Elham Index: **{tier.title()}**")
 
-    # SHAP explanations (overall + behaviours-only) + table
+    # -------------------------- WHAT-IF SIMULATOR --------------------------
+    st.subheader("🧪 What-if simulator (behaviours)")
+    st.caption("Adjust behaviours below (e.g., reduce snacks from 3+/day → 1–2/day) and see the new predicted index.")
+    sim_cols = st.columns(2)
+    sim_beh = {}
+
+    for i, c in enumerate(cat_cols):
+        current = beh_vals.get(c, cat_modes.get(c, "Unknown"))
+        opts = ordered_options(c, cat_values, current)
+        with sim_cols[i % 2]:
+            if len(opts) <= 1:
+                sim_beh[c] = current
+            else:
+                # Use select_slider for ordered choices, fallback to selectbox if needed
+                try:
+                    sim_beh[c] = st.select_slider(f"What if **{c}** becomes", options=opts, value=current)
+                except Exception:
+                    sim_beh[c] = st.selectbox(f"What if {c} becomes", options=opts, index=opts.index(current))
+
+    # Build simulated row and predict
+    X_row_sim = X_row.copy()
+    for c in cat_cols:
+        X_row_sim[c] = sim_beh[c]
+    X_df_sim = normalize_cats(pd.DataFrame([X_row_sim]))
+    y_sim = float(pipe.predict(X_df_sim)[0])
+    delta = y_sim - y_hat
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.metric("Simulated Elham’s Index", f"{y_sim:.2f}", delta=f"{delta:+.2f}")
+    with c2:
+        # Show which behaviours changed (before → after)
+        changed = {k: (beh_vals.get(k, ""), sim_beh[k]) for k in cat_cols if sim_beh[k] != beh_vals.get(k, "")}
+        st.write("**Changed behaviours**")
+        st.json(changed if changed else {"(none)": "No behaviour changed"})
+
+    st.divider()
+
+    # ------------------ SHAP explanations (overall + behaviours) ------------------
     try:
         import shap
         pre = pipe.named_steps["pre"]
