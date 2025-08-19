@@ -15,7 +15,7 @@ from sklearn.inspection import permutation_importance, PartialDependenceDisplay
 
 
 # ============================ CONFIG =============================
-st.set_page_config(page_title="Elham AI · Behaviors + Explainability",
+st.set_page_config(page_title="Dental AI · Behaviors + Explainability",
                    page_icon="🦷", layout="wide")
 
 DATA_PATH  = "data/no_recommendation_dental_dataset_cleaned_keep_including_wisdom.csv"
@@ -590,7 +590,7 @@ with st.expander("See features used for training & current selections"):
     st.caption(f"Behaviour (categorical) features ({len(cat_cols)}): {', '.join(cat_cols)}")
 
 # Elham counts
-st.subheader("Enter Elham features (counts)")
+st.subheader("Enter Elham Index (counts)")
 left, right = st.columns(2)
 elham_core = {}
 primary_elham_fields = [
