@@ -95,52 +95,87 @@ NORMALIZERS = {
 }
 
 # ======== SES HELPERS (auto-detect + normalize + banding) ========
-def _t(x): return str(x).strip().lower()
-def _num(x):
-    s = re.sub(r"[^\d.]", "", str(x))
-    try: return float(s) if s else None
-    except: return None
+# ======== SES HELPERS (improved fuzzy match + robust normalizers) ========
+import re
 
-# fuzzy mapping so it still works if your headers vary a bit
+def _t(x): return str(x).strip().lower()
+
+def _num(x):
+    """
+    Extract a float from strings like '1,500 EGP', '1500', '1.5k', etc.
+    """
+    s = str(x).strip().lower()
+    if not s or s in {"nan", "none", "unknown"}:
+        return None
+    # k shorthand
+    if s.endswith("k"):
+        try:
+            return float(s[:-1]) * 1000.0
+        except:
+            pass
+    # remove currency/signs, keep digits + dot + comma
+    s = re.sub(r"[^\d.,-]", "", s)
+    s = s.replace(",", "")
+    try:
+        return float(s)
+    except:
+        return None
+
+# 1) Fuzzy → include your exact headers
 SES_FUZZY = {
-    "school":              ["school"],
-    "grade":               ["grade"],
-    "house_ownership":     ["house_ow", "ownership"],
-    "i_live_with":         ["i_live_with", "live_with"],
-    "average_income":      ["average_in", "family_in", "income"],
-    "pocket_money":        ["pocket_m", "allowance"],
+    "school":              ["school"],  # 'school'
+    "grade":               ["grade"],   # 'grade'
+    "house_ownership":     ["house_ow", "ownership", "house_owned", "house_owned_or_rent", "own", "rent"],
+    "i_live_with":         ["i_live_with", "live_with", "i_live_with_my_parents"],
+    "average_income":      ["average_in", "family_in", "income", "household_income"],
+    "pocket_money":        ["pocket_m", "allowance", "pocket_money"],
     "father_s_education":  ["father_s_e", "father edu"],
     "mother_s_education":  ["mother_s_e", "mother edu"],
     "father_s_job":        ["father_s_j", "father job", "father occ"],
     "mother_s_job":        ["mother_s_j", "mother job", "mother occ"],
-    "insurance":           ["insurance"],
-    "access_to":           ["access_to", "access"],
-    "frequency":           ["frequency", "visit"],
-    "affordability":       ["afford"],
+    "insurance":           ["insurance", "health_insurance", "dental_insurance"],
+    "access_to":           ["access_to", "access", "access_to_oral_health_care"],
+    "frequency":           ["frequency", "visit", "frequency_of_visits"],
+    "affordability":       ["afford", "affordability"],
 }
 
 def find_cols(df, fuzzy=SES_FUZZY):
-    out, low = {}, {c: c.lower() for c in df.columns}
+    """
+    Prefer exact header match; else substring match.
+    """
+    out = {}
+    lower = {c: c.lower() for c in df.columns}
     for canon, keys in fuzzy.items():
+        # exact first
         hit = None
-        for c, lc in low.items():
-            if any(k in lc for k in keys):
+        for c in df.columns:
+            lc = lower[c]
+            if any(lc == k for k in keys):
                 hit = c; break
+        if hit is None:
+            for c in df.columns:
+                lc = lower[c]
+                if any(k in lc for k in keys):
+                    hit = c; break
         out[canon] = hit
     return out
 
+# 2) Normalizers — broaden mappings
+
 def norm_school(v):
     s=_t(v)
-    if any(k in s for k in ["public","government","gov","experimental"]): return "Public"
-    if any(k in s for k in ["international","american","british","german","french","canadian","igcse","ib","intl"]): return "International"
-    if "private" in s or "independent" in s: return "Private"
+    if any(k in s for k in ["government", "gov", "public", "experimental"]): return "Public"
+    # Egyptian “National” schools are typically private; “Language school” can be public or private.
+    if "language" in s and ("experimental" in s or "gov" in s or "public" in s): return "Public"
+    if any(k in s for k in ["international","american","british","german","french","canadian","igcse","ib"]): return "International"
+    if any(k in s for k in ["private","national","language"]): return "Private"
     return "Unknown"
 
 def norm_grade(v):
     s=_t(v)
-    if any(k in s for k in ["kg","nursery","primary","grade 1","grade 2","grade 3","grade 4","grade 5","grade 6"]): return "Primary"
-    if any(k in s for k in ["prep","grade 7","grade 8","grade 9"]): return "Preparatory"
-    if any(k in s for k in ["sec","grade 10","grade 11","grade 12"]): return "Secondary"
+    if any(k in s for k in ["kg","nursery","primary", "grade 1","grade 2","grade 3","grade 4","grade 5","grade 6"]): return "Primary"
+    if any(k in s for k in ["prep","preparatory","grade 7","grade 8","grade 9"]): return "Preparatory"
+    if any(k in s for k in ["sec","secondary","grade 10","grade 11","grade 12"]): return "Secondary"
     return "Unknown"
 
 def norm_house_ownership(v):
@@ -151,7 +186,7 @@ def norm_house_ownership(v):
 
 def norm_live_with(v):
     s=_t(v)
-    if any(k in s for k in ["father and mother","both parents","two parents"]): return "Two parents"
+    if any(k in s for k in ["father and mother","both parents","two parents","with my parents"]): return "Two parents"
     if any(k in s for k in ["single","mother only","father only","one parent"]): return "Single parent"
     if any(k in s for k in ["relative","grand","aunt","uncle","guardian","care"]): return "Relatives/Other"
     return "Unknown"
@@ -166,36 +201,36 @@ def norm_parent_edu(v):
 
 def norm_job(v):
     s=_t(v)
-    if any(k in s for k in ["not working","no job","housewife","unemployed"]): return "Not working"
-    if any(k in s for k in ["manager","engineer","doctor","dentist","pharmacist","teacher","accountant","lawyer"]): return "Professional/Manager"
+    if any(k in s for k in ["not working","no job","housewife","unemployed","homemaker"]): return "Not working"
+    if any(k in s for k in ["manager","engineer","doctor","dentist","pharmacist","teacher","accountant","lawyer","architect","nurse"]): return "Professional/Manager"
     if s and s!="unknown": return "Worker/Clerk"
     return "Unknown"
 
 def norm_insurance(v):
     s=_t(v)
-    if s in {"yes","insured","y","1","covered"}: return "Insured"
-    if s in {"no","uninsured","n","0"}:          return "Uninsured"
+    if s in {"yes","insured","y","1","covered","have"}: return "Insured"
+    if s in {"no","uninsured","n","0","don’t have","dont have","do not have"}: return "Uninsured"
     return "Unknown"
 
 def norm_access(v):
     s=_t(v)
-    if any(k in s for k in ["easy","available","near"]): return "Easy"
-    if any(k in s for k in ["hard","difficult","far","limited"]): return "Difficult"
-    if s in {"moderate","average"}:               return "Moderate"
+    if any(k in s for k in ["easy","available","near","good"]): return "Easy"
+    if any(k in s for k in ["hard","difficult","far","limited","poor"]): return "Difficult"
+    if s in {"moderate","average","ok"}: return "Moderate"
     return "Unknown"
 
 def norm_afford(v):
     s=_t(v)
     if any(k in s for k in ["cannot","can't","no","unaffordable"]): return "No"
-    if any(k in s for k in ["hard","difficult","sometimes","partial"]): return "Hard"
-    if any(k in s for k in ["yes","afford","can"]): return "Yes"
+    if any(k in s for k in ["hard","difficult","sometimes","partial","struggle"]): return "Hard"
+    if any(k in s for k in ["yes","afford","can","affordable"]): return "Yes"
     return "Unknown"
 
 def norm_visit_freq(v):
     s=_t(v)
-    if any(k in s for k in ["6","12","regular","check","year","every"]): return "Regular"
-    if any(k in s for k in ["pain","emergency","only when"]):           return "Pain-only"
-    if "never" in s:                                                    return "Never"
+    if any(k in s for k in ["6", "12", "regular", "check", "year", "every"]): return "Regular"
+    if any(k in s for k in ["pain","emergency","only when"]):             return "Pain-only"
+    if "never" in s:                                                       return "Never"
     return "Occasional"
 
 SES_NORMALIZERS = {
@@ -216,7 +251,7 @@ SES_NORMALIZERS = {
 def prepare_ses(df: pd.DataFrame, train_idx=None):
     """
     Normalize SES text columns and create income/pocket tertile bands
-    using 34th/67th percentiles on TRAIN only.
+    using 34th/67th percentiles on TRAIN only (robust fallback).
     Returns: df2, ses_cat_cols, raw_numeric_drop, meta
     """
     df2 = df.copy()
@@ -227,21 +262,32 @@ def prepare_ses(df: pd.DataFrame, train_idx=None):
         if col is not None and key in SES_NORMALIZERS:
             df2[col] = df2[col].apply(SES_NORMALIZERS[key])
 
-    # derive bands on TRAIN
+    # robust banding
     def _bands(col_key, new_name):
         col = ses_map.get(col_key)
-        if col is None: return None
+        if col is None: 
+            return None
         idx = train_idx if train_idx is not None else df2.index
         s = df2.loc[idx, col].apply(_num).dropna()
-        if len(s) >= 10:
+        if len(s) >= 10 and s.nunique() >= 3:
             q1, q2 = s.quantile([0.34, 0.67])
-            df2[new_name] = df2[col].apply(
-                lambda v: "Unknown" if _num(v) is None else ("Low" if _num(v) < q1 else ("Medium" if _num(v) < q2 else "High"))
-            )
-            return (float(q1), float(q2))
+        elif len(s) >= 2:
+            # fallback: use median split if data is thin
+            q1 = s.median()
+            q2 = s.median()
         else:
             df2[new_name] = "Unknown"
             return None
+
+        def lab(v):
+            x = _num(v)
+            if x is None: return "Unknown"
+            if x < q1:    return "Low"
+            if x < q2:    return "Medium"
+            return "High"
+
+        df2[new_name] = df2[col].apply(lab)
+        return (float(q1), float(q2))
 
     inc_qs = _bands("average_income", "income_band")
     pok_qs = _bands("pocket_money",  "pocket_band")
@@ -258,7 +304,7 @@ def prepare_ses(df: pd.DataFrame, train_idx=None):
     if "income_band" in df2.columns: ses_cat_cols.append("income_band")
     if "pocket_band" in df2.columns: ses_cat_cols.append("pocket_band")
 
-    # drop raw numeric SES if we use bands
+    # drop raw numeric SES if we used bands
     raw_numeric_drop = []
     for key in ["average_income","pocket_money"]:
         col = ses_map.get(key)
@@ -267,6 +313,8 @@ def prepare_ses(df: pd.DataFrame, train_idx=None):
 
     meta = {"ses_map": ses_map, "income_quantiles": inc_qs, "pocket_quantiles": pok_qs}
     return df2, ses_cat_cols, raw_numeric_drop, meta
+# ======== END improved SES helpers ========
+
 # ======== END SES HELPERS ========
 
 # ========================= RISK TIERS =============================
