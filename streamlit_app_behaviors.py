@@ -1,4 +1,4 @@
-# streamlit_app.py — Dental AI Coach (Behaviours + SES + Explainability)
+# streamlit_app_behaviors.py — Dental AI Coach (Behaviours + SES + Explainability)
 
 import os, re
 import numpy as np
@@ -94,102 +94,100 @@ NORMALIZERS = {
     "lactobacilli_load_in_saliva": norm_mutans_lacto,
 }
 
-# ======== SES HELPERS (auto-detect + normalize + banding) ========
-# ======== SES HELPERS (improved fuzzy match + robust normalizers) ========
-import re
+def normalize_cats(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    for c, f in NORMALIZERS.items():
+        if c in df.columns:
+            df[c] = df[c].astype(str).map(f)
+    for c in df.select_dtypes(include="object").columns:
+        df[c] = df[c].astype(str).str.strip()
+    return df
 
-def _t(x): return str(x).strip().lower()
+# ====================== SES HELPERS (inline) ======================
+def _t(x) -> str: return str(x).strip().lower()
+def _keep(v, default="Unknown"): 
+    s=str(v).strip()
+    return s.title() if s else default
 
 def _num(x):
-    """
-    Extract a float from strings like '1,500 EGP', '1500', '1.5k', etc.
-    """
     s = str(x).strip().lower()
-    if not s or s in {"nan", "none", "unknown"}:
-        return None
-    # k shorthand
+    if not s or s in {"nan","none","unknown"}: return None
     if s.endswith("k"):
-        try:
-            return float(s[:-1]) * 1000.0
-        except:
-            pass
-    # remove currency/signs, keep digits + dot + comma
-    s = re.sub(r"[^\d.,-]", "", s)
-    s = s.replace(",", "")
-    try:
-        return float(s)
-    except:
-        return None
+        try: return float(s[:-1]) * 1000.0
+        except: pass
+    s = re.sub(r"[^\d.,-]", "", s).replace(",", "")
+    try: return float(s)
+    except: return None
 
-# 1) Fuzzy → include your exact headers
 SES_FUZZY = {
-    "school":              ["school"],  # 'school'
-    "grade":               ["grade"],   # 'grade'
-    "house_ownership":     ["house_ow", "ownership", "house_owned", "house_owned_or_rent", "own", "rent"],
-    "i_live_with":         ["i_live_with", "live_with", "i_live_with_my_parents"],
-    "average_income":      ["average_in", "family_in", "income", "household_income"],
-    "pocket_money":        ["pocket_m", "allowance", "pocket_money"],
-    "father_s_education":  ["father_s_e", "father edu"],
-    "mother_s_education":  ["mother_s_e", "mother edu"],
-    "father_s_job":        ["father_s_j", "father job", "father occ"],
-    "mother_s_job":        ["mother_s_j", "mother job", "mother occ"],
+    "school":              ["school"],
+    "grade":               ["grade"],
+
+    "house_ownership": [
+        "house_owned_or_rent", "house_owi", "house_ow", "ownership", "own", "rent"
+    ],
+    "i_live_with": [
+        "i_live_with_my_parents", "i_live_with", "live_with"
+    ],
+
+    "average_income":      ["average_in", "avg_income", "family_in", "income", "household_income"],
+    "pocket_money":        ["pocket_m", "pocket_money", "allowance"],
+
+    "father_s_education":  ["father_s_e", "father edu", "father_edu"],
+    "mother_s_education":  ["mother_s_education", "mother_s_", "mother edu", "mother_edu"],
+
+    "father_s_job":        ["father_s_jc", "father_s_j", "father job", "father occ"],
+    "mother_s_job":        ["mother_s_j", "mother_s_job", "mother_s_", "mother occ", "mother job"],
+
     "insurance":           ["insurance", "health_insurance", "dental_insurance"],
-    "access_to":           ["access_to", "access", "access_to_oral_health_care"],
-    "frequency":           ["frequency", "visit", "frequency_of_visits"],
-    "affordability":       ["afford", "affordability"],
+
+    "access_to":           ["access_to_oral_health_care", "access_to", "access"],
+    "frequency":           ["frequency_of_visits", "frequency,", "frequency", "visit"],
+    "affordability":       ["affordability", "afford", "affordabilit"],
 }
 
 def find_cols(df, fuzzy=SES_FUZZY):
-    """
-    Prefer exact header match; else substring match.
-    """
     out = {}
     lower = {c: c.lower() for c in df.columns}
     for canon, keys in fuzzy.items():
-        # exact first
         hit = None
         for c in df.columns:
-            lc = lower[c]
-            if any(lc == k for k in keys):
+            if lower[c] in keys:
                 hit = c; break
         if hit is None:
             for c in df.columns:
-                lc = lower[c]
-                if any(k in lc for k in keys):
+                if any(k in lower[c] for k in keys):
                     hit = c; break
         out[canon] = hit
     return out
 
-# 2) Normalizers — broaden mappings
-
 def norm_school(v):
     s=_t(v)
-    if any(k in s for k in ["government", "gov", "public", "experimental"]): return "Public"
-    # Egyptian “National” schools are typically private; “Language school” can be public or private.
-    if "language" in s and ("experimental" in s or "gov" in s or "public" in s): return "Public"
+    if any(k in s for k in ["government","gov","public","experimental"]): return "Public"
+    if "language" in s and any(k in s for k in ["experimental","gov","public"]): return "Public"
     if any(k in s for k in ["international","american","british","german","french","canadian","igcse","ib"]): return "International"
     if any(k in s for k in ["private","national","language"]): return "Private"
-    return "Unknown"
+    return _keep(v)
 
 def norm_grade(v):
     s=_t(v)
-    if any(k in s for k in ["kg","nursery","primary", "grade 1","grade 2","grade 3","grade 4","grade 5","grade 6"]): return "Primary"
+    if any(k in s for k in ["kg","nursery","primary","grade 1","grade 2","grade 3","grade 4","grade 5","grade 6"]): return "Primary"
     if any(k in s for k in ["prep","preparatory","grade 7","grade 8","grade 9"]): return "Preparatory"
     if any(k in s for k in ["sec","secondary","grade 10","grade 11","grade 12"]): return "Secondary"
-    return "Unknown"
+    return _keep(v)
 
 def norm_house_ownership(v):
     s=_t(v)
-    if "own" in s: return "Owned"
+    if "own" in s:  return "Owned"
     if "rent" in s: return "Rented"
-    return "Other/Unknown"
+    return _keep(v)
 
 def norm_live_with(v):
     s=_t(v)
-    if any(k in s for k in ["father and mother","both parents","two parents","with my parents"]): return "Two parents"
-    if any(k in s for k in ["single","mother only","father only","one parent"]): return "Single parent"
+    if any(k in s for k in ["father and mother","both parents","two parents","with my parents"]): return "Two Parents"
+    if any(k in s for k in ["single","mother only","father only","one parent"]): return "Single Parent"
     if any(k in s for k in ["relative","grand","aunt","uncle","guardian","care"]): return "Relatives/Other"
-    return "Unknown"
+    return _keep(v)
 
 def norm_parent_edu(v):
     s=_t(v)
@@ -197,84 +195,77 @@ def norm_parent_edu(v):
     if any(k in s for k in ["uni","college","bsc","ba","license","licence"]): return "University"
     if any(k in s for k in ["secondary","high school","prep"]): return "Secondary"
     if "primary" in s or "elementary" in s: return "Primary"
-    return "Unknown"
+    return _keep(v)
 
 def norm_job(v):
     s=_t(v)
-    if any(k in s for k in ["not working","no job","housewife","unemployed","homemaker"]): return "Not working"
+    if any(k in s for k in ["not working","no job","housewife","unemployed","homemaker"]): return "Not Working"
     if any(k in s for k in ["manager","engineer","doctor","dentist","pharmacist","teacher","accountant","lawyer","architect","nurse"]): return "Professional/Manager"
-    if s and s!="unknown": return "Worker/Clerk"
+    if s and s!="unknown": return _keep(v)
     return "Unknown"
 
 def norm_insurance(v):
     s=_t(v)
     if s in {"yes","insured","y","1","covered","have"}: return "Insured"
     if s in {"no","uninsured","n","0","don’t have","dont have","do not have"}: return "Uninsured"
-    return "Unknown"
+    return _keep(v)
 
 def norm_access(v):
     s=_t(v)
     if any(k in s for k in ["easy","available","near","good"]): return "Easy"
     if any(k in s for k in ["hard","difficult","far","limited","poor"]): return "Difficult"
     if s in {"moderate","average","ok"}: return "Moderate"
-    return "Unknown"
+    return _keep(v)
 
 def norm_afford(v):
     s=_t(v)
     if any(k in s for k in ["cannot","can't","no","unaffordable"]): return "No"
     if any(k in s for k in ["hard","difficult","sometimes","partial","struggle"]): return "Hard"
     if any(k in s for k in ["yes","afford","can","affordable"]): return "Yes"
-    return "Unknown"
+    return _keep(v)
 
 def norm_visit_freq(v):
     s=_t(v)
-    if any(k in s for k in ["6", "12", "regular", "check", "year", "every"]): return "Regular"
-    if any(k in s for k in ["pain","emergency","only when"]):             return "Pain-only"
-    if "never" in s:                                                       return "Never"
-    return "Occasional"
+    if any(k in s for k in ["6","12","regular","check","year","every"]): return "Regular"
+    if any(k in s for k in ["pain","emergency","only when"]):           return "Pain-Only"
+    if "never" in s:                                                     return "Never"
+    return _keep(v)
 
 SES_NORMALIZERS = {
-    "school": norm_school,
-    "grade": norm_grade,
-    "house_ownership": norm_house_ownership,
-    "i_live_with": norm_live_with,
-    "father_s_education": norm_parent_edu,
-    "mother_s_education": norm_parent_edu,
-    "father_s_job": norm_job,
-    "mother_s_job": norm_job,
-    "insurance": norm_insurance,
-    "access_to": norm_access,
-    "affordability": norm_afford,
-    "frequency": norm_visit_freq,
+    "school":               norm_school,
+    "grade":                norm_grade,
+    "house_ownership":      norm_house_ownership,
+    "i_live_with":          norm_live_with,
+    "father_s_education":   norm_parent_edu,
+    "mother_s_education":   norm_parent_edu,
+    "father_s_job":         norm_job,
+    "mother_s_job":         norm_job,
+    "insurance":            norm_insurance,
+    "access_to":            norm_access,
+    "affordability":        norm_afford,
+    "frequency":            norm_visit_freq,
 }
 
 def prepare_ses(df: pd.DataFrame, train_idx=None):
-    """
-    Normalize SES text columns and create income/pocket tertile bands
-    using 34th/67th percentiles on TRAIN only (robust fallback).
-    Returns: df2, ses_cat_cols, raw_numeric_drop, meta
-    """
     df2 = df.copy()
     ses_map = find_cols(df2)
 
     # normalize text SES
     for key, col in ses_map.items():
-        if col is not None and key in SES_NORMALIZERS:
+        if col is not None and key in SES_NORMALIZERS and col in df2.columns:
             df2[col] = df2[col].apply(SES_NORMALIZERS[key])
 
-    # robust banding
+    # bands on TRAIN rows
     def _bands(col_key, new_name):
         col = ses_map.get(col_key)
-        if col is None: 
+        if col is None or col not in df2.columns: 
             return None
         idx = train_idx if train_idx is not None else df2.index
         s = df2.loc[idx, col].apply(_num).dropna()
         if len(s) >= 10 and s.nunique() >= 3:
             q1, q2 = s.quantile([0.34, 0.67])
         elif len(s) >= 2:
-            # fallback: use median split if data is thin
-            q1 = s.median()
-            q2 = s.median()
+            q1 = q2 = s.median()
         else:
             df2[new_name] = "Unknown"
             return None
@@ -292,7 +283,7 @@ def prepare_ses(df: pd.DataFrame, train_idx=None):
     inc_qs = _bands("average_income", "income_band")
     pok_qs = _bands("pocket_money",  "pocket_band")
 
-    # SES categorical columns used by the model
+    # collect SES categorical columns
     ses_cat_cols = []
     for key in ["school","grade","house_ownership","i_live_with",
                 "father_s_education","mother_s_education",
@@ -304,7 +295,7 @@ def prepare_ses(df: pd.DataFrame, train_idx=None):
     if "income_band" in df2.columns: ses_cat_cols.append("income_band")
     if "pocket_band" in df2.columns: ses_cat_cols.append("pocket_band")
 
-    # drop raw numeric SES if we used bands
+    # raw numeric SES to drop (we use bands instead)
     raw_numeric_drop = []
     for key in ["average_income","pocket_money"]:
         col = ses_map.get(key)
@@ -313,23 +304,11 @@ def prepare_ses(df: pd.DataFrame, train_idx=None):
 
     meta = {"ses_map": ses_map, "income_quantiles": inc_qs, "pocket_quantiles": pok_qs}
     return df2, ses_cat_cols, raw_numeric_drop, meta
-# ======== END improved SES helpers ========
-
-# ======== END SES HELPERS ========
 
 # ========================= RISK TIERS =============================
-def normalize_cats(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    for c, f in NORMALIZERS.items():
-        if c in df.columns:
-            df[c] = df[c].astype(str).map(f)
-    for c in df.select_dtypes(include="object").columns:
-        df[c] = df[c].astype(str).str.strip()
-    return df
-
 def build_risk_bins(df, target_col=TARGET_COL):
     y = df[target_col].dropna().values
-    q1, q2 = np.quantile(y, [0.34, 0.67])   # tercile-like cutpoints
+    q1, q2 = np.quantile(y, [0.34, 0.67])
     return (float(q1), float(q2))
 
 def index_tier(y_hat, bins):
@@ -355,7 +334,7 @@ def tier_plan(tier):
             varnish="Fluoride varnish every 6 months",
             diet_focus="Reduce between-meal snacks, especially sticky sweets",
         )
-    return dict(  # low
+    return dict(
         recall="6–12 months",
         toothpaste="1450 ppm fluoride twice daily",
         rinse="Optional fluoride rinse if enamel defects or ortho",
@@ -397,12 +376,8 @@ def build_pipeline(num_cols, cat_cols):
 @st.cache_resource(show_spinner=False)
 def train_model(df: pd.DataFrame, cat_cols_override=None, drop_num_cols=None):
     num_cols, beh_cat_cols = split_feature_types(df)
-
-    # remove raw numeric SES if present (we'll use bands instead)
     if drop_num_cols:
         num_cols = [c for c in num_cols if c not in set(drop_num_cols)]
-
-    # use override cat list (behaviours + SES), else just behaviours
     cat_cols = (cat_cols_override[:] if cat_cols_override else beh_cat_cols[:])
 
     X = df[num_cols + cat_cols].copy()
@@ -419,7 +394,7 @@ def train_model(df: pd.DataFrame, cat_cols_override=None, drop_num_cols=None):
     feat_names = pre.get_feature_names_out().tolist()
     num_medians = X[num_cols].median(numeric_only=True)
     cat_modes   = {c: (X[c].mode(dropna=True).iloc[0] if X[c].notna().any() else "Unknown") for c in cat_cols}
-    cat_values  = {c: sorted(X[c].dropna().unique().tolist()) for c in cat_cols}
+    cat_values  = {c: sorted(X[c].dropna().astype(str).unique().tolist(), key=lambda s: (s=="Unknown", s)) for c in cat_cols}
     risk_bins   = build_risk_bins(df, TARGET_COL)
 
     return pipe, metrics, num_cols, cat_cols, feat_names, num_medians, cat_modes, cat_values, risk_bins
@@ -463,6 +438,17 @@ def plot_bar(items, title):
     st.pyplot(fig)
 
 # =================== DETAILED ADVICE (ALL BEHAVIOURS) =============
+def tier_plan_text(tier):
+    plan = tier_plan(tier)
+    return [
+        f"**Overall plan for {tier.title()} risk:**",
+        f"- Recall: **{plan['recall']}**",
+        f"- Toothpaste: **{plan['toothpaste']}**",
+        f"- Mouthrinse: **{plan['rinse']}**",
+        f"- Varnish: **{plan['varnish']}**",
+        f"- Diet focus: **{plan['diet_focus']}**",
+    ]
+
 def lines_for_behavior(name, val, tier):
     v = (str(val) if val is not None else "Unknown").strip().lower()
     plan = tier_plan(tier)
@@ -486,7 +472,6 @@ def lines_for_behavior(name, val, tier):
     if name == "mouth_rinse":
         out += [f"Add a **fluoride mouthrinse**: {plan['rinse']}." if v in {"no","unknown"}
                 else f"Continue **fluoride mouthrinse**: {plan['rinse']}."]
-
     if name == "snacks_frequency":
         if any(k in v for k in ["3+",">2","many","often","frequent"]):
             out += ["**Cut snacks to ≤1–2/day**; keep sweets **with meals**.", plan["diet_focus"]]
@@ -522,7 +507,6 @@ def lines_for_behavior(name, val, tier):
     if name == "sticky_food":
         if v in {"yes","y"}:
             out += ["Avoid **sticky foods**; if eaten, **rinse with water** and avoid bedtime intake."]
-
     if name == "salivary_ph":
         if "low" in v:
             out += ["**Low pH**: use **sugar-free gum** (xylitol), avoid acids between meals, increase hydration.",
@@ -530,7 +514,7 @@ def lines_for_behavior(name, val, tier):
         else:
             out += ["Maintain **neutral pH** habits: water instead of acidic drinks."]
     if name == "salivary_consistency":
-        if "high" in v or "thick" in v or "visc" in v:
+        if any(k in v for k in ["high","thick","visc"]):
             out += ["**Thick saliva**: hydrate, review meds causing dryness, consider sugar-free lozenges/gum."]
         elif "low" in v:
             out += ["Ensure **adequate hydration**; monitor for dryness symptoms."]
@@ -549,16 +533,7 @@ def lines_for_behavior(name, val, tier):
     return [x for x in out if x]
 
 def detailed_behavior_recommendations(all_behaviors: dict, tier: str):
-    plan = tier_plan(tier)
-    header = [
-        f"**Overall plan for {tier.title()} risk:**",
-        f"- Recall: **{plan['recall']}**",
-        f"- Toothpaste: **{plan['toothpaste']}**",
-        f"- Mouthrinse: **{plan['rinse']}**",
-        f"- Varnish: **{plan['varnish']}**",
-        f"- Diet focus: **{plan['diet_focus']}**",
-    ]
-    recs, seen = header[:], set()
+    recs, seen = tier_plan_text(tier), set()
     for name, val in all_behaviors.items():
         for line in lines_for_behavior(name, val, tier):
             if line and line not in seen:
@@ -566,33 +541,56 @@ def detailed_behavior_recommendations(all_behaviors: dict, tier: str):
                 seen.add(line)
     return recs
 
-# =============== ORDERED OPTIONS FOR WHAT-IF SLIDERS ==============
-ORDERED_CHOICES = {
+# =============== DATASET-DRIVEN UI OPTIONS ========================
+def _mode_or_unknown(series: pd.Series) -> str:
+    m = series.dropna().astype(str)
+    return m.mode().iloc[0] if not m.empty and not m.mode().empty else "Unknown"
+
+PREFERRED_ORDER = {
     "tooth_brushing_frequency": ["Irregular","1/day","2/day"],
-    "interdental_cleaning": ["No","Yes"],
-    "mouth_rinse": ["No","Yes"],
-    "snacks_frequency": ["0/day","1–2/day","3+/day"],
-    "sugar": ["None","Occasional","Frequent"],
-    "carbonated_beverages": ["None","Occasional","Frequent"],
-    "sticky_food": ["No","Yes"],
-    "hydration": ["Low","Normal","High"],
-    "salivary_ph": ["Low","Normal","High"],
-    "salivary_consistency": ["Low","Normal","High"],
-    "buffering_capacity": ["Low","Moderate","Normal","High"],
-    "mutans_load_in_saliva": ["Low","Normal","High"],
+    "interdental_cleaning":     ["No","Yes"],
+    "mouth_rinse":              ["No","Yes"],
+    "snacks_frequency":         ["0/day","1–2/day","3+/day"],
+    "sugar":                    ["None","Occasional","Frequent"],
+    "carbonated_beverages":     ["None","Occasional","Frequent"],
+    "sticky_food":              ["No","Yes"],
+    "hydration":                ["Low","Normal","High"],
+    "salivary_ph":              ["Low","Normal","High"],
+    "salivary_consistency":     ["Low","Normal","High"],
+    "buffering_capacity":       ["Low","Moderate","Normal","High"],
+    "mutans_load_in_saliva":    ["Low","Normal","High"],
     "lactobacilli_load_in_saliva": ["Low","Normal","High"],
 }
-def ordered_options(col, cat_values, current):
-    if col in ORDERED_CHOICES:
-        opts = ORDERED_CHOICES[col][:]
-    else:
-        opts = cat_values.get(col, [])
-    if current not in opts:
-        opts = [current] + [o for o in opts if o != current]
-    return opts
+
+def build_options_from_df(df: pd.DataFrame, cols):
+    out = {}
+    for c in cols:
+        if c in df.columns:
+            vals = df[c].dropna().astype(str).unique().tolist()
+            vals = sorted(vals, key=lambda s: (s == "Unknown", s))
+            # apply friendly preferred order when applicable
+            pref = PREFERRED_ORDER.get(c)
+            if pref:
+                seen = set()
+                ordered = [v for v in pref if v in vals and not (v in seen or seen.add(v))]
+                ordered += [v for v in vals if v not in set(pref)]
+                vals = ordered
+            out[c] = vals if vals else ["Unknown"]
+        else:
+            out[c] = ["Unknown"]
+    return out
+
+def default_from_df(df: pd.DataFrame, col: str) -> str:
+    return _mode_or_unknown(df[col]) if col in df.columns else "Unknown"
 
 # =============================== UI ===============================
 st.title("🦷 Dental AI Coach: Behaviours → Explainable Index + Advice")
+
+# Optional dev helper: clear caches after changing SES rules
+if st.button("🔁 Force clear cache (use after changing SES rules)"):
+    st.cache_data.clear()
+    st.cache_resource.clear()
+    st.experimental_rerun()
 
 df = load_data(DATA_PATH)
 
@@ -600,12 +598,15 @@ df = load_data(DATA_PATH)
 idx_train, idx_test = train_test_split(df.index, test_size=0.2, random_state=42)
 df, ses_cat_cols, raw_numeric_ses, ses_meta = prepare_ses(df, train_idx=idx_train)
 
-# UI uses behaviours only; model uses behaviours + SES
+# UI lists and dataset-driven options
 beh_cols     = [c for c in BEHAVIOR_COLS if c in df.columns]
 cat_cols_all = beh_cols + [c for c in ses_cat_cols if c not in beh_cols]
+beh_options  = build_options_from_df(df, beh_cols)
+ses_cols_ui  = [c for c in cat_cols_all if c not in beh_cols]
+ses_options  = build_options_from_df(df, ses_cols_ui)
 
 # Train with SES included; drop raw numeric SES in favour of bands
-pipe, metrics, num_cols, cat_cols_all, feat_names, num_medians, cat_modes, cat_values, risk_bins = \
+pipe, metrics, num_cols, all_cat_cols, feat_names, num_medians, cat_modes, cat_values, risk_bins = \
     train_model(df, cat_cols_override=cat_cols_all, drop_num_cols=raw_numeric_ses)
 
 st.success(f"Model ready · R² = {metrics['R2']:.3f} · MAE = {metrics['MAE']:.2f}")
@@ -613,12 +614,12 @@ st.success(f"Model ready · R² = {metrics['R2']:.3f} · MAE = {metrics['MAE']:.
 # ========================= MODEL VISUALIZATIONS (FAST) =========================
 st.subheader("Model visualizations")
 
-X_all = df[num_cols + cat_cols_all].copy()
+X_all = df[num_cols + all_cat_cols].copy()
 y_all = df[TARGET_COL].astype(float).values
 X_tr_v, X_te_v, y_tr_v, y_te_v = train_test_split(X_all, y_all, test_size=0.2, random_state=42)
 
 VIS_SAMPLE_MAX = 400
-PDP_GRID        = 15
+PDP_GRID       = 15
 
 if len(X_te_v) > VIS_SAMPLE_MAX:
     X_te_s = X_te_v.sample(VIS_SAMPLE_MAX, random_state=42)
@@ -681,7 +682,7 @@ with tab_imp:
                 grouped.setdefault(orig, 0.0)
                 grouped[orig] += float(importances[i])
             return sorted(grouped.items(), key=lambda kv: kv[1], reverse=True)
-        gitems = _group_importances(trans_names, num_cols, cat_cols_all, reg.feature_importances_)[:20]
+        gitems = _group_importances(trans_names, num_cols, all_cat_cols, reg.feature_importances_)[:20]
         fig5, ax5 = plt.subplots()
         ax5.bar([k for k, _ in gitems], [v for _, v in gitems])
         ax5.set_xticklabels([k for k, _ in gitems], rotation=45, ha="right")
@@ -734,10 +735,13 @@ with tab_pdp:
 with st.expander("See features used for training & current selections"):
     st.caption(f"Numeric features ({len(num_cols)}): {', '.join(num_cols[:30])}{' ...' if len(num_cols)>30 else ''}")
     st.caption(f"Behaviour (categorical) features ({len(beh_cols)}): {', '.join(beh_cols)}")
-    other = [c for c in cat_cols_all if c not in beh_cols]
+    other = [c for c in all_cat_cols if c not in beh_cols]
     st.caption(f"SES (categorical) features ({len(other)}): {', '.join(other)}")
+    st.caption(f"SES column map: {ses_meta['ses_map']}")
+    st.caption(f"Income q34/q67: {ses_meta['income_quantiles']} · Pocket q34/q67: {ses_meta['pocket_quantiles']}")
 
-# Elham counts input (show common fields if present)
+# ------------------------ INPUT UI (patient) -----------------------
+# Elham counts input (only those present)
 st.subheader("Enter Elham Index (counts)")
 left, right = st.columns(2)
 elham_core = {}
@@ -748,69 +752,68 @@ primary_elham_fields = [
 ]
 present_elham_fields = [c for c in primary_elham_fields if c in df.columns]
 mid = len(present_elham_fields)//2
-with left:
-    for k in present_elham_fields[:mid]:
+# We'll reuse num_medians from training
+for k in present_elham_fields[:mid]:
+    with left:
         elham_core[k] = st.number_input(k, min_value=0, step=1, value=int(num_medians.get(k, 0)))
-with right:
-    for k in present_elham_fields[mid:]:
+for k in present_elham_fields[mid:]:
+    with right:
         elham_core[k] = st.number_input(k, min_value=0, step=1, value=int(num_medians.get(k, 0)))
 
-# Behaviours UI
+# Behaviours UI (dataset-driven)
 st.subheader("Behavior & lifestyle inputs")
-beh_vals = {}
-cols = st.columns(2)
+beh_vals, cols = {}, st.columns(2)
 for i, c in enumerate(beh_cols):
-    opts = cat_values.get(c, [])
-    default = cat_modes.get(c, opts[0] if opts else "Unknown")
+    opts    = beh_options.get(c, ["Unknown"])
+    default = default_from_df(df, c)
     with cols[i % 2]:
-        beh_vals[c] = st.selectbox(c, options=opts or ["Unknown"],
-                                   index=(opts.index(default) if default in opts else 0))
+        beh_vals[c] = st.selectbox(c, options=opts, index=(opts.index(default) if default in opts else 0))
 
-# SES UI (categorical; no sliders)
+# SES UI (dataset-driven)
 ses_vals = {}
-ses_cols_ui = [c for c in cat_cols_all if c not in beh_cols]
 if ses_cols_ui:
     st.subheader("Socio-economic inputs")
     grid = st.columns(2)
     for i, c in enumerate(ses_cols_ui):
-        opts = cat_values.get(c, [])
-        default = cat_modes.get(c, opts[0] if opts else "Unknown")
+        opts    = build_options_from_df(df, [c]).get(c, ["Unknown"])
+        default = default_from_df(df, c)
         with grid[i % 2]:
-            ses_vals[c] = st.selectbox(c, options=opts or ["Unknown"],
-                                       index=(opts.index(default) if default in opts else 0))
+            ses_vals[c] = st.selectbox(c, options=opts, index=(opts.index(default) if default in opts else 0))
 
 with st.expander("Your current selections"):
     st.json({"behaviours": beh_vals, "ses": ses_vals})
 
+# ------------------------- PREDICT & EXPLAIN -----------------------
 if st.button("Predict + Explain"):
-    # Assemble one-row input
+    # Make one-row input for prediction
     X_row = {c: float(elham_core.get(c, num_medians.get(c, 0))) for c in num_cols}
     for c in beh_cols:
-        X_row[c] = beh_vals.get(c, cat_modes.get(c, "Unknown"))
+        X_row[c] = beh_vals.get(c, default_from_df(df, c))
     for c in ses_cols_ui:
-        X_row[c] = ses_vals.get(c, cat_modes.get(c, "Unknown"))
-    X_df = normalize_cats(pd.DataFrame([X_row]))
+        X_row[c] = ses_vals.get(c, default_from_df(df, c))
 
-    # Predict
+    X_df = normalize_cats(pd.DataFrame([X_row]))
     y_hat = float(pipe.predict(X_df)[0])
+
     st.success(f"Predicted Elham’s Index (including wisdom): **{y_hat:.2f}**")
     tier = index_tier(y_hat, risk_bins)
     st.info(f"Risk tier based on predicted Elham Index: **{tier.title()}**")
 
-    # -------------------------- WHAT-IF SIMULATOR --------------------------
+    # ---------------------- WHAT-IF SIMULATOR ----------------------
     st.subheader("🧪 What-if simulator (behaviours)")
     st.caption("Adjust behaviours below (e.g., reduce snacks from 3+/day → 1–2/day) and see the new predicted index.")
-
     sim_cols = st.columns(2)
     sim_beh = {}
+    # order sliders using the same dataset-driven choices (with preferred order where defined)
     for i, c in enumerate(beh_cols):
-        current = beh_vals.get(c, cat_modes.get(c, "Unknown"))
-        opts = ordered_options(c, cat_values, current)
+        opts = beh_options.get(c, ["Unknown"])
+        current = beh_vals.get(c, opts[0])
         with sim_cols[i % 2]:
             try:
                 sim_beh[c] = st.select_slider(f"What if **{c}** becomes", options=opts, value=current)
             except Exception:
-                sim_beh[c] = st.selectbox(f"What if {c} becomes", options=opts, index=opts.index(current))
+                idx = opts.index(current) if current in opts else 0
+                sim_beh[c] = st.selectbox(f"What if {c} becomes", options=opts, index=idx)
 
     X_row_sim = X_row.copy()
     for c in beh_cols:
@@ -826,7 +829,7 @@ if st.button("Predict + Explain"):
 
     st.divider()
 
-    # ------------------ SHAP explanations (overall + behaviours + SES) ------------------
+    # ----------------- SHAP explanations (grouped) ----------------
     try:
         import shap
         pre = pipe.named_steps["pre"]
@@ -834,7 +837,7 @@ if st.button("Predict + Explain"):
         explainer = shap.TreeExplainer(pipe.named_steps["reg"])
         shap_vals = explainer.shap_values(X_trans)
 
-        grouped = group_shap_by_original(feat_names, shap_vals, num_cols, cat_cols_all)
+        grouped = group_shap_by_original(feat_names, shap_vals, num_cols, all_cat_cols)
 
         st.subheader("Top drivers of prediction (all features)")
         top_all = grouped[:14]
@@ -863,7 +866,7 @@ if st.button("Predict + Explain"):
 with st.expander("Fairness check by SES (hold-out)"):
     if ses_cols_ui:
         try:
-            X_all = df[num_cols + cat_cols_all].copy()
+            X_all = df[num_cols + all_cat_cols].copy()
             y_all = df[TARGET_COL].astype(float).values
             X_tr_a, X_te_a, y_tr_a, y_te_a = train_test_split(X_all, y_all, test_size=0.2, random_state=42)
             yhat_a = pipe.predict(X_te_a)
