@@ -7,12 +7,14 @@ import streamlit as st
 import matplotlib.pyplot as plt
 
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import r2_score, mean_absolute_error
+from sklearn.metrics import (
+    r2_score, mean_absolute_error, accuracy_score, f1_score
+)
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.inspection import PartialDependenceDisplay
 
 # ============================ CONFIG =============================
@@ -344,8 +346,13 @@ def tier_plan(tier):
 
 # ==================== PREPROCESS / TRAINING =======================
 def make_ohe() -> OneHotEncoder:
-    try:    return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-    except TypeError: return OneHotEncoder(handle_unknown="ignore", sparse=False)
+    """Return a version-safe OneHotEncoder compatible across sklearn versions."""
+    try:
+        # sklearn >= 1.2
+        return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+    except TypeError:
+        # sklearn < 1.2
+        return OneHotEncoder(handle_unknown="ignore", sparse=False)
 
 @st.cache_data(show_spinner=False)
 def load_data(path: str) -> pd.DataFrame:
@@ -437,6 +444,30 @@ def plot_bar(items, title):
     fig.tight_layout()
     st.pyplot(fig)
 
+# ============== Extra helpers for the SES➜Behaviour pilot =========
+def _can_stratify(y) -> bool:
+    """True if every class appears at least twice and there are >=2 classes."""
+    vc = pd.Series(y).value_counts()
+    return (vc >= 2).all() and len(vc) >= 2
+
+def _group_cat_importances(trans_names, cat_cols, importances):
+    """Sum one-hot importances back to their original categorical column."""
+    grouped = {}
+    for i, name in enumerate(trans_names):
+        if name.startswith("cat__"):
+            owner = None
+            for c in cat_cols:
+                pref = f"cat__{c}_"
+                if name.startswith(pref):
+                    owner = c
+                    break
+            owner = owner or name
+        else:
+            owner = name
+        grouped.setdefault(owner, 0.0)
+        grouped[owner] += float(importances[i])
+    return sorted(grouped.items(), key=lambda kv: kv[1], reverse=True)
+
 # =================== DETAILED ADVICE (ALL BEHAVIOURS) =============
 def tier_plan_text(tier):
     plan = tier_plan(tier)
@@ -472,6 +503,7 @@ def lines_for_behavior(name, val, tier):
     if name == "mouth_rinse":
         out += [f"Add a **fluoride mouthrinse**: {plan['rinse']}." if v in {"no","unknown"}
                 else f"Continue **fluoride mouthrinse**: {plan['rinse']}."]
+
     if name == "snacks_frequency":
         if any(k in v for k in ["3+",">2","many","often","frequent"]):
             out += ["**Cut snacks to ≤1–2/day**; keep sweets **with meals**.", plan["diet_focus"]]
@@ -507,6 +539,7 @@ def lines_for_behavior(name, val, tier):
     if name == "sticky_food":
         if v in {"yes","y"}:
             out += ["Avoid **sticky foods**; if eaten, **rinse with water** and avoid bedtime intake."]
+
     if name == "salivary_ph":
         if "low" in v:
             out += ["**Low pH**: use **sugar-free gum** (xylitol), avoid acids between meals, increase hydration.",
@@ -568,7 +601,6 @@ def build_options_from_df(df: pd.DataFrame, cols):
         if c in df.columns:
             vals = df[c].dropna().astype(str).unique().tolist()
             vals = sorted(vals, key=lambda s: (s == "Unknown", s))
-            # apply friendly preferred order when applicable
             pref = PREFERRED_ORDER.get(c)
             if pref:
                 seen = set()
@@ -741,7 +773,6 @@ with st.expander("See features used for training & current selections"):
     st.caption(f"Income q34/q67: {ses_meta['income_quantiles']} · Pocket q34/q67: {ses_meta['pocket_quantiles']}")
 
 # ------------------------ INPUT UI (patient) -----------------------
-# Elham counts input (only those present)
 st.subheader("Enter Elham Index (counts)")
 left, right = st.columns(2)
 elham_core = {}
@@ -752,7 +783,6 @@ primary_elham_fields = [
 ]
 present_elham_fields = [c for c in primary_elham_fields if c in df.columns]
 mid = len(present_elham_fields)//2
-# We'll reuse num_medians from training
 for k in present_elham_fields[:mid]:
     with left:
         elham_core[k] = st.number_input(k, min_value=0, step=1, value=int(num_medians.get(k, 0)))
@@ -775,7 +805,7 @@ if ses_cols_ui:
     st.subheader("Socio-economic inputs")
     grid = st.columns(2)
     for i, c in enumerate(ses_cols_ui):
-        opts    = build_options_from_df(df, [c]).get(c, ["Unknown"])
+        opts    = ses_options.get(c, ["Unknown"])
         default = default_from_df(df, c)
         with grid[i % 2]:
             ses_vals[c] = st.selectbox(c, options=opts, index=(opts.index(default) if default in opts else 0))
@@ -804,7 +834,6 @@ if st.button("Predict + Explain"):
     st.caption("Adjust behaviours below (e.g., reduce snacks from 3+/day → 1–2/day) and see the new predicted index.")
     sim_cols = st.columns(2)
     sim_beh = {}
-    # order sliders using the same dataset-driven choices (with preferred order where defined)
     for i, c in enumerate(beh_cols):
         opts = beh_options.get(c, ["Unknown"])
         current = beh_vals.get(c, opts[0])
@@ -862,6 +891,77 @@ if st.button("Predict + Explain"):
     for line in detailed_behavior_recommendations({c: beh_vals.get(c, "") for c in beh_cols}, tier):
         st.markdown(line)
 
+# -------------------- AI: SES ➜ Behaviour (pilot) -----------------
+def render_ai_ses_to_behaviour(df: pd.DataFrame, beh_cols: list[str], ses_cols_ui: list[str]) -> None:
+    """Pilot: learn how SES features relate to a selected behaviour category."""
+    if not ses_cols_ui:
+        st.info("No SES columns available to model behaviours.")
+        return
+    if not beh_cols:
+        st.info("No behaviour columns detected in the dataset.")
+        return
+
+    st.write("This pilot trains a simple classifier to predict one behaviour from SES only, "
+             "then shows which SES fields were most predictive.")
+
+    beh = st.selectbox("Behaviour to model from SES", beh_cols)
+
+    # Data
+    X = df[ses_cols_ui].astype(str).fillna("Unknown").copy()
+    y = df[beh].astype(str).fillna("Unknown").copy()
+
+    # Preprocess: OHE (version-safe) on SES
+    pre = ColumnTransformer(
+        transformers=[("cat", make_ohe(), ses_cols_ui)],
+        remainder="drop",
+        verbose_feature_names_out=True,
+    )
+
+    # Simple model
+    clf = RandomForestClassifier(n_estimators=400, random_state=42, n_jobs=-1)
+    pipe = Pipeline([("pre", pre), ("clf", clf)])
+
+    # Split: only stratify if safe
+    if _can_stratify(y):
+        X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.25, random_state=42, stratify=y)
+    else:
+        X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.25, random_state=42)
+
+    pipe.fit(X_tr, y_tr)
+    y_pred = pipe.predict(X_te)
+    acc = float(accuracy_score(y_te, y_pred))
+    f1  = float(f1_score(y_te, y_pred, average="macro"))
+
+    st.markdown(f"**Hold-out accuracy:** {acc:.3f} · **Macro-F1:** {f1:.3f}")
+
+    # Grouped importances (sum one-hot back to SES columns)
+    pre_fit = pipe.named_steps["pre"]
+    names   = pre_fit.get_feature_names_out().tolist()
+    importances = pipe.named_steps["clf"].feature_importances_
+    gitems = _group_cat_importances(names, ses_cols_ui, importances)[:10]
+
+    # Plot
+    fig, ax = plt.subplots()
+    ax.bar([k for k, _ in gitems], [v for _, v in gitems])
+    ax.set_xticklabels([k for k, _ in gitems], rotation=45, ha="right")
+    ax.set_ylabel("Grouped importance (sum)")
+    ax.set_title(f"SES drivers of '{beh}' (pilot)")
+    fig.tight_layout()
+    st.pyplot(fig)
+
+    # Show the top SES column’s level distribution vs behaviour
+    if gitems:
+        top_ses = gitems[0][0]
+        st.caption(f"Most predictive SES field: **{top_ses}** — distribution of {beh} by {top_ses}")
+        ct = (pd.crosstab(df[top_ses].astype(str), df[beh].astype(str), normalize="index")
+                .fillna(0.0)
+                .sort_index())
+        ct = ct[sorted(ct.columns)]
+        st.dataframe(ct.style.format("{:.2f}"))
+
+with st.expander("AI: SES ➜ Behaviour influence (pilot)"):
+    render_ai_ses_to_behaviour(df, beh_cols, ses_cols_ui)
+
 # ----------------------- Fairness quick audit -----------------------
 with st.expander("Fairness check by SES (hold-out)"):
     if ses_cols_ui:
@@ -872,7 +972,9 @@ with st.expander("Fairness check by SES (hold-out)"):
             yhat_a = pipe.predict(X_te_a)
             te = X_te_a.copy(); te["_y"] = y_te_a; te["_yhat"] = yhat_a
             for c in ses_cols_ui:
-                mae = te.groupby(te[c].astype(str)).apply(lambda g: float(np.mean(np.abs(g["_y"]-g["_yhat"])))).rename("MAE")
+                mae = te.groupby(te[c].astype(str)).apply(
+                    lambda g: float(np.mean(np.abs(g["_y"]-g["_yhat"])))
+                ).rename("MAE")
                 st.markdown(f"**MAE by {c}**")
                 st.dataframe(mae.sort_values().to_frame())
         except Exception as e:
