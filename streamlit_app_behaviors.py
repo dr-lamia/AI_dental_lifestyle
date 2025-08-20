@@ -963,21 +963,81 @@ with st.expander("AI: SES ➜ Behaviour influence (pilot)"):
     render_ai_ses_to_behaviour(df, beh_cols, ses_cols_ui)
 
 # ----------------------- Fairness quick audit -----------------------
+# ----------------------- Fairness quick audit -----------------------
 with st.expander("Fairness check by SES (hold-out)"):
     if ses_cols_ui:
         try:
+            # re-make a hold-out split independent of training
             X_all = df[num_cols + all_cat_cols].copy()
             y_all = df[TARGET_COL].astype(float).values
-            X_tr_a, X_te_a, y_tr_a, y_te_a = train_test_split(X_all, y_all, test_size=0.2, random_state=42)
+            X_tr_a, X_te_a, y_tr_a, y_te_a = train_test_split(
+                X_all, y_all, test_size=0.2, random_state=42
+            )
             yhat_a = pipe.predict(X_te_a)
-            te = X_te_a.copy(); te["_y"] = y_te_a; te["_yhat"] = yhat_a
+
+            te = X_te_a.copy()
+            te["_y"] = y_te_a
+            te["_yhat"] = yhat_a
+            te["_ae"] = np.abs(te["_y"] - te["_yhat"])
+
+            overall_mae = float(te["_ae"].mean())
+            st.caption(f"Overall hold-out MAE: **{overall_mae:.3f}**")
+
+            min_n = st.slider("Minimum rows per group (collapse rare)", 3, 30, 8, step=1)
+
+            def render_group_table(col: str):
+                tmp = te.copy()
+                tmp["_grp"] = tmp[col].astype(str).fillna("Unknown")
+                counts = tmp["_grp"].value_counts()
+                rare = counts[counts < min_n].index
+                if len(rare) > 0:
+                    tmp.loc[tmp["_grp"].isin(rare), "_grp"] = f"Other (<{min_n})"
+
+                agg = tmp.groupby("_grp").agg(
+                    n=("_ae", "size"),
+                    MAE=("_ae", "mean"),
+                    sd=("_ae", "std"),
+                ).fillna(0.0)
+
+                # share, standard error, 95% CI, delta vs overall
+                total = float(agg["n"].sum())
+                agg["share"] = agg["n"] / total
+                agg["se"] = agg["sd"] / np.sqrt(np.maximum(agg["n"], 1))
+                agg["ci_low"] = agg["MAE"] - 1.96 * agg["se"]
+                agg["ci_high"] = agg["MAE"] + 1.96 * agg["se"]
+                agg["Δ vs overall"] = agg["MAE"] - overall_mae
+
+                # nice ordering: biggest groups first, then MAE
+                agg = agg.sort_values(["n", "MAE"], ascending=[False, True])
+                cols_to_show = ["n", "share", "MAE", "Δ vs overall", "ci_low", "ci_high"]
+                st.markdown(f"**MAE by {col}**")
+                st.dataframe(
+                    agg[cols_to_show].style.format({
+                        "share": "{:.1%}",
+                        "MAE": "{:.3f}",
+                        "Δ vs overall": "{:+.3f}",
+                        "ci_low": "{:.3f}",
+                        "ci_high": "{:.3f}",
+                    })
+                )
+
+                # quick bar plot with overall reference line
+                fig, ax = plt.subplots(figsize=(6, max(2, 0.35*len(agg))))
+                ax.barh(agg.index, agg["MAE"])
+                ax.axvline(overall_mae, linestyle="--", label="overall MAE")
+                ax.invert_yaxis()
+                ax.set_xlabel("MAE")
+                ax.set_title(f"{col} — group MAE (n≥{min_n}; rare→Other)")
+                ax.legend()
+                fig.tight_layout()
+                st.pyplot(fig)
+                plt.close(fig)
+
             for c in ses_cols_ui:
-                mae = te.groupby(te[c].astype(str)).apply(
-                    lambda g: float(np.mean(np.abs(g["_y"]-g["_yhat"])))
-                ).rename("MAE")
-                st.markdown(f"**MAE by {c}**")
-                st.dataframe(mae.sort_values().to_frame())
+                render_group_table(c)
+
         except Exception as e:
             st.caption(f"Subgroup MAE not available: {e}")
     else:
         st.caption("No SES columns detected.")
+
