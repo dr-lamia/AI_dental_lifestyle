@@ -7,12 +7,12 @@ import streamlit as st
 import matplotlib.pyplot as plt
 
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import r2_score, mean_absolute_error
+from sklearn.metrics import r2_score, mean_absolute_error, accuracy_score, f1_score
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import OneHotEncoder, LabelEncoder
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.inspection import PartialDependenceDisplay
 
 # ============================ CONFIG =============================
@@ -105,7 +105,7 @@ def normalize_cats(df: pd.DataFrame) -> pd.DataFrame:
 
 # ====================== SES HELPERS (inline) ======================
 def _t(x) -> str: return str(x).strip().lower()
-def _keep(v, default="Unknown"): 
+def _keep(v, default="Unknown"):
     s=str(v).strip()
     return s.title() if s else default
 
@@ -258,7 +258,7 @@ def prepare_ses(df: pd.DataFrame, train_idx=None):
     # bands on TRAIN rows
     def _bands(col_key, new_name):
         col = ses_map.get(col_key)
-        if col is None or col not in df2.columns: 
+        if col is None or col not in df2.columns:
             return None
         idx = train_idx if train_idx is not None else df2.index
         s = df2.loc[idx, col].apply(_num).dropna()
@@ -568,7 +568,6 @@ def build_options_from_df(df: pd.DataFrame, cols):
         if c in df.columns:
             vals = df[c].dropna().astype(str).unique().tolist()
             vals = sorted(vals, key=lambda s: (s == "Unknown", s))
-            # apply friendly preferred order when applicable
             pref = PREFERRED_ORDER.get(c)
             if pref:
                 seen = set()
@@ -582,6 +581,28 @@ def build_options_from_df(df: pd.DataFrame, cols):
 
 def default_from_df(df: pd.DataFrame, col: str) -> str:
     return _mode_or_unknown(df[col]) if col in df.columns else "Unknown"
+
+# ========================= SAFE TRAIN/TEST SPLIT ===================
+def _safe_split(X, y, test_size=0.25, random_state=42):
+    """
+    Use stratify=y only when every class has enough samples for both
+    train and test; otherwise fall back to a non-stratified split.
+    """
+    vals, counts = np.unique(y, return_counts=True)
+    can_stratify = (
+        len(vals) >= 2
+        and np.min(counts) >= 2
+        and np.all(counts * test_size >= 1)
+        and np.all(counts * (1 - test_size) >= 1)
+    )
+    if can_stratify:
+        return train_test_split(
+            X, y, test_size=test_size, random_state=random_state, stratify=y
+        ), True
+    else:
+        return train_test_split(
+            X, y, test_size=test_size, random_state=random_state
+        ), False
 
 # =============================== UI ===============================
 st.title("🦷 Dental AI Coach: Behaviours → Explainable Index + Advice")
@@ -741,7 +762,6 @@ with st.expander("See features used for training & current selections"):
     st.caption(f"Income q34/q67: {ses_meta['income_quantiles']} · Pocket q34/q67: {ses_meta['pocket_quantiles']}")
 
 # ------------------------ INPUT UI (patient) -----------------------
-# Elham counts input (only those present)
 st.subheader("Enter Elham Index (counts)")
 left, right = st.columns(2)
 elham_core = {}
@@ -752,7 +772,6 @@ primary_elham_fields = [
 ]
 present_elham_fields = [c for c in primary_elham_fields if c in df.columns]
 mid = len(present_elham_fields)//2
-# We'll reuse num_medians from training
 for k in present_elham_fields[:mid]:
     with left:
         elham_core[k] = st.number_input(k, min_value=0, step=1, value=int(num_medians.get(k, 0)))
@@ -785,7 +804,6 @@ with st.expander("Your current selections"):
 
 # ------------------------- PREDICT & EXPLAIN -----------------------
 if st.button("Predict + Explain"):
-    # Make one-row input for prediction
     X_row = {c: float(elham_core.get(c, num_medians.get(c, 0))) for c in num_cols}
     for c in beh_cols:
         X_row[c] = beh_vals.get(c, default_from_df(df, c))
@@ -799,12 +817,11 @@ if st.button("Predict + Explain"):
     tier = index_tier(y_hat, risk_bins)
     st.info(f"Risk tier based on predicted Elham Index: **{tier.title()}**")
 
-    # ---------------------- WHAT-IF SIMULATOR ----------------------
+    # What-if simulator
     st.subheader("🧪 What-if simulator (behaviours)")
     st.caption("Adjust behaviours below (e.g., reduce snacks from 3+/day → 1–2/day) and see the new predicted index.")
     sim_cols = st.columns(2)
     sim_beh = {}
-    # order sliders using the same dataset-driven choices (with preferred order where defined)
     for i, c in enumerate(beh_cols):
         opts = beh_options.get(c, ["Unknown"])
         current = beh_vals.get(c, opts[0])
@@ -829,7 +846,7 @@ if st.button("Predict + Explain"):
 
     st.divider()
 
-    # ----------------- SHAP explanations (grouped) ----------------
+    # SHAP explanations (grouped)
     try:
         import shap
         pre = pipe.named_steps["pre"]
@@ -879,3 +896,82 @@ with st.expander("Fairness check by SES (hold-out)"):
             st.caption(f"Subgroup MAE not available: {e}")
     else:
         st.caption("No SES columns detected.")
+
+# --------------- AI: SES → Behaviour influence (pilot) ---------------
+def render_ai_ses_to_behaviour(df: pd.DataFrame, beh_cols, ses_cols_ui):
+    st.subheader("🤖 AI: Do SES factors influence behaviours?")
+    if not ses_cols_ui:
+        st.info("No SES columns available after preprocessing.")
+        return
+    if not beh_cols:
+        st.info("No behaviour columns found.")
+        return
+
+    bcol = st.selectbox("Pick a behaviour to model from SES", beh_cols, key="ai_ses_beh_choice")
+
+    # Build dataset
+    keep = df[ses_cols_ui + [bcol]].dropna(subset=[bcol]).copy()
+    if keep.empty:
+        st.info("No rows available for this behaviour.")
+        return
+
+    X = keep[ses_cols_ui].astype(str)
+    y = keep[bcol].astype(str)
+
+    # Need at least 2 classes
+    if y.nunique() < 2:
+        st.info("This behaviour has only one class after cleaning; cannot train a classifier.")
+        return
+
+    # Encode target
+    le = LabelEncoder()
+    y_enc = le.fit_transform(y.values)
+
+    # Preprocess (OHE on SES)
+    pre = ColumnTransformer(
+        transformers=[("cat", OneHotEncoder(handle_unknown="ignore", sparse=False), ses_cols_ui)],
+        remainder="drop",
+        verbose_feature_names_out=True,
+    )
+
+    clf = RandomForestClassifier(n_estimators=400, random_state=42, class_weight="balanced")
+    pipe_cls = Pipeline([("pre", pre), ("clf", clf)])
+
+    # Safe split (uses stratify when possible)
+    (X_tr, X_te, y_tr, y_te), used_strat = _safe_split(X, y_enc, test_size=0.25, random_state=42)
+    if not used_strat:
+        st.caption("ℹ️ Stratified split disabled for this behaviour (insufficient samples per class).")
+
+    pipe_cls.fit(X_tr, y_tr)
+    y_pred = pipe_cls.predict(X_te)
+
+    acc = accuracy_score(y_te, y_pred)
+    f1  = f1_score(y_te, y_pred, average="macro")
+    st.write(f"**Hold-out accuracy:** {acc:.3f} · **Macro-F1:** {f1:.3f} · Classes: {list(le.classes_)}")
+
+    # Aggregate importances by original SES column
+    pre_fnames = pipe_cls.named_steps["pre"].get_feature_names_out().tolist()
+    importances = pipe_cls.named_steps["clf"].feature_importances_
+    grouped = {}
+    for i, name in enumerate(pre_fnames):
+        # name like 'cat__<col>_<level>'
+        if name.startswith("cat__"):
+            base = name.split("__", 1)[1]
+            col = base.split("_", 1)[0]
+        else:
+            col = name
+        grouped[col] = grouped.get(col, 0.0) + float(importances[i])
+
+    top = sorted(grouped.items(), key=lambda kv: kv[1], reverse=True)[:12]
+    if top:
+        fig, ax = plt.subplots()
+        ax.bar([k for k, _ in top], [v for _, v in top])
+        ax.set_xticklabels([k for k, _ in top], rotation=45, ha="right")
+        ax.set_ylabel("Importance (sum over levels)")
+        ax.set_title(f"Which SES features predict '{bcol}'?")
+        fig.tight_layout(); st.pyplot(fig); plt.close(fig)
+    else:
+        st.info("No importances to show.")
+
+with st.expander("AI: SES → Behaviour influence (pilot)"):
+    render_ai_ses_to_behaviour(df, beh_cols, ses_cols_ui)
