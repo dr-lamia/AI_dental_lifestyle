@@ -904,26 +904,37 @@ with st.expander("🏛️ SES → Behaviours → Elham (analysis)"):
             else:
                 st.info("Could not compute associations (insufficient category variety).")
 
-            # ---------- 2) Behaviour distribution across SES levels ----------
-            st.markdown("**Behaviour distribution by SES level**")
-            c1, c2 = st.columns(2)
-            with c1:
-                pick_beh = st.selectbox("Behaviour", beh_cols, key="ses_beh_pick")
-            with c2:
-                pick_ses = st.selectbox("SES variable", ses_cols_ui, key="ses_var_pick")
+           # ---------- 2) Behaviour distribution across SES levels ----------
+st.markdown("**Behaviour distribution by SES level**")
+c1, c2 = st.columns(2)
+with c1:
+    pick_beh = st.selectbox("Behaviour", beh_cols, key="ses_beh_pick")
+with c2:
+    pick_ses = st.selectbox("SES variable", ses_cols_ui, key="ses_var_pick")
 
-            dist = (dfx.groupby([pick_ses, pick_beh]).size()
-                      .groupby(level=0).apply(lambda s: s / s.sum())
-                      .rename("share").reset_index())
+# Work on a copy; make sure we keep Unknowns (not NaNs)
+dfx2 = df[[pick_ses, pick_beh]].copy()
+dfx2[pick_ses] = dfx2[pick_ses].astype(str).replace({"nan": "Unknown"})
+dfx2[pick_beh] = dfx2[pick_beh].astype(str).replace({"nan": "Unknown"})
 
-            # simple bar chart (one bar group per SES level)
-            fig, ax = plt.subplots()
-            pivoted = dist.pivot(index=pick_ses, columns=pick_beh, values="share").fillna(0.0)
-            pivoted.plot(kind="bar", ax=ax)
-            ax.set_ylabel("Proportion within SES level")
-            ax.set_title(f"{pick_beh} distribution by {pick_ses}")
-            fig.tight_layout()
-            st.pyplot(fig); plt.close(fig)
+# Count by SES × behaviour, then turn counts into within-SES shares
+counts = (
+    dfx2.groupby([pick_ses, pick_beh], as_index=False)
+        .size()
+        .rename(columns={"size": "n"})
+)
+counts["share"] = counts["n"] / counts.groupby(pick_ses)["n"].transform("sum")
+
+# Pivot to a wide table for an easy bar plot
+pivoted = counts.pivot(index=pick_ses, columns=pick_beh, values="share").fillna(0.0)
+
+fig, ax = plt.subplots()
+pivoted.plot(kind="bar", ax=ax)
+ax.set_ylabel("Proportion within SES level")
+ax.set_title(f"{pick_beh} distribution by {pick_ses}")
+fig.tight_layout()
+st.pyplot(fig); plt.close(fig)
+
 
         # ---------- 3) Mediation-lite: does SES add predictive power beyond behaviours? ----------
         st.markdown("**Mediation-lite: ΔR² when adding SES on top of behaviours**")
