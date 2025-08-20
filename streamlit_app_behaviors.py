@@ -905,35 +905,90 @@ with st.expander("🏛️ SES → Behaviours → Elham (analysis)"):
                 st.info("Could not compute associations (insufficient category variety).")
 
            # ---------- 2) Behaviour distribution across SES levels ----------
-st.markdown("**Behaviour distribution by SES level**")
-c1, c2 = st.columns(2)
-with c1:
-    pick_beh = st.selectbox("Behaviour", beh_cols, key="ses_beh_pick")
-with c2:
-    pick_ses = st.selectbox("SES variable", ses_cols_ui, key="ses_var_pick")
+# ======================= SES → Behaviours → Index (analysis; optional) =======================
+with st.expander("🏛️ SES → Behaviours → Elham (analysis)"):
+    st.caption(
+        "Exploratory only: effect sizes (Cramér’s V) for SES ↔ behaviour pairs, "
+        "behaviour distributions across SES, and a mediation-lite ΔR² check."
+    )
+    run_ses_analysis = st.toggle("Run SES–behaviour analysis", value=False)
 
-# Work on a copy; make sure we keep Unknowns (not NaNs)
-dfx2 = df[[pick_ses, pick_beh]].copy()
-dfx2[pick_ses] = dfx2[pick_ses].astype(str).replace({"nan": "Unknown"})
-dfx2[pick_beh] = dfx2[pick_beh].astype(str).replace({"nan": "Unknown"})
+    if run_ses_analysis:
+        # ---------- helpers ----------
+        def cramers_v(a: pd.Series, b: pd.Series) -> float:
+            """Cramér’s V (no SciPy). Higher = stronger association. Works for categorical↔categorical."""
+            tab = pd.crosstab(a.astype(str), b.astype(str))
+            n = tab.values.sum()
+            if n == 0 or tab.shape[0] < 2 or tab.shape[1] < 2:
+                return np.nan
+            expected = np.outer(tab.sum(1), tab.sum(0)) / n
+            chi2 = ((tab.values - expected) ** 2 / expected).sum()
+            denom = n * (min(tab.shape[0] - 1, tab.shape[1] - 1))
+            return float(np.sqrt(chi2 / denom)) if denom > 0 else np.nan
 
-# Count by SES × behaviour, then turn counts into within-SES shares
-counts = (
-    dfx2.groupby([pick_ses, pick_beh], as_index=False)
-        .size()
-        .rename(columns={"size": "n"})
-)
-counts["share"] = counts["n"] / counts.groupby(pick_ses)["n"].transform("sum")
+        # ---------- 1) SES ↔ behaviour association table ----------
+        if not ses_cols_ui:
+            st.info("No SES columns detected in the prepared dataset.")
+        else:
+            rows = []
+            # (Optionally sample to keep it snappy on very large data)
+            dfx = df  # or: df.sample(min(len(df), 3000), random_state=42)
+            for bcol in beh_cols:
+                for scol in ses_cols_ui:
+                    v = cramers_v(dfx[bcol], dfx[scol])
+                    if np.isfinite(v):
+                        rows.append({"Behaviour": bcol, "SES": scol, "CramersV": round(v, 3)})
 
-# Pivot to a wide table for an easy bar plot
-pivoted = counts.pivot(index=pick_ses, columns=pick_beh, values="share").fillna(0.0)
+            if rows:
+                assoc = (pd.DataFrame(rows)
+                         .sort_values("CramersV", ascending=False)
+                         .head(20))
+                st.markdown("**Top SES → behaviour associations (Cramér’s V)**")
+                st.dataframe(assoc, use_container_width=True)
+            else:
+                st.info("Could not compute associations (insufficient category variety).")
 
-fig, ax = plt.subplots()
-pivoted.plot(kind="bar", ax=ax)
-ax.set_ylabel("Proportion within SES level")
-ax.set_title(f"{pick_beh} distribution by {pick_ses}")
-fig.tight_layout()
-st.pyplot(fig); plt.close(fig)
+            # ---------- 2) Behaviour distribution across SES levels ----------
+            st.markdown("**Behaviour distribution by SES level**")
+            c1, c2 = st.columns(2)
+            with c1:
+                pick_beh = st.selectbox("Behaviour", beh_cols, key="ses_beh_pick")
+            with c2:
+                pick_ses = st.selectbox("SES variable", ses_cols_ui, key="ses_var_pick")
+
+            dist = (dfx.groupby([pick_ses, pick_beh]).size()
+                      .groupby(level=0).apply(lambda s: s / s.sum())
+                      .rename("share").reset_index())
+
+            # simple bar chart (one bar group per SES level)
+            fig, ax = plt.subplots()
+            pivoted = dist.pivot(index=pick_ses, columns=pick_beh, values="share").fillna(0.0)
+            pivoted.plot(kind="bar", ax=ax)
+            ax.set_ylabel("Proportion within SES level")
+            ax.set_title(f"{pick_beh} distribution by {pick_ses}")
+            fig.tight_layout()
+            st.pyplot(fig); plt.close(fig)
+
+        # ---------- 3) Mediation-lite: does SES add predictive power beyond behaviours? ----------
+        st.markdown("**Mediation-lite: ΔR² when adding SES on top of behaviours**")
+        try:
+            # Train a behaviours-only model (cached via @st.cache_resource in your train_model)
+            _, metrics_beh_only, *_ = train_model(df,
+                                                  cat_cols_override=beh_cols,
+                                                  drop_num_cols=None)  # raw SES numerics already handled upstream
+
+            d1, d2, d3 = st.columns(3)
+            with d1: st.metric("R² (behaviours only)", f"{metrics_beh_only['R2']:.3f}")
+            with d2: st.metric("R² (behaviours + SES)", f"{metrics['R2']:.3f}")
+            with d3: st.metric("ΔR²", f"{(metrics['R2'] - metrics_beh_only['R2']):+0.3f}")
+
+            st.caption(
+                "Interpretation: the closer ΔR² is to **0**, the more SES effects appear to be **mediated by behaviours**. "
+                "A larger positive ΔR² suggests SES retains **direct** predictive signal for Elham index even after behaviours."
+            )
+        except Exception as e:
+            st.info(f"Mediation-lite check unavailable: {e}")
+          
 
 
         # ---------- 3) Mediation-lite: does SES add predictive power beyond behaviours? ----------
