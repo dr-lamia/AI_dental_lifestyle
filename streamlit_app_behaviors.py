@@ -7,12 +7,12 @@ import streamlit as st
 import matplotlib.pyplot as plt
 
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import r2_score, mean_absolute_error, accuracy_score, f1_score
+from sklearn.metrics import r2_score, mean_absolute_error
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import OneHotEncoder, LabelEncoder
-from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.inspection import PartialDependenceDisplay
 
 # ============================ CONFIG =============================
@@ -105,7 +105,7 @@ def normalize_cats(df: pd.DataFrame) -> pd.DataFrame:
 
 # ====================== SES HELPERS (inline) ======================
 def _t(x) -> str: return str(x).strip().lower()
-def _keep(v, default="Unknown"):
+def _keep(v, default="Unknown"): 
     s=str(v).strip()
     return s.title() if s else default
 
@@ -122,15 +122,25 @@ def _num(x):
 SES_FUZZY = {
     "school":              ["school"],
     "grade":               ["grade"],
-    "house_ownership":     ["house_owned_or_rent", "house_owi", "house_ow", "ownership", "own", "rent"],
-    "i_live_with":         ["i_live_with_my_parents", "i_live_with", "live_with"],
+
+    "house_ownership": [
+        "house_owned_or_rent", "house_owi", "house_ow", "ownership", "own", "rent"
+    ],
+    "i_live_with": [
+        "i_live_with_my_parents", "i_live_with", "live_with"
+    ],
+
     "average_income":      ["average_in", "avg_income", "family_in", "income", "household_income"],
     "pocket_money":        ["pocket_m", "pocket_money", "allowance"],
+
     "father_s_education":  ["father_s_e", "father edu", "father_edu"],
     "mother_s_education":  ["mother_s_education", "mother_s_", "mother edu", "mother_edu"],
+
     "father_s_job":        ["father_s_jc", "father_s_j", "father job", "father occ"],
     "mother_s_job":        ["mother_s_j", "mother_s_job", "mother_s_", "mother occ", "mother job"],
+
     "insurance":           ["insurance", "health_insurance", "dental_insurance"],
+
     "access_to":           ["access_to_oral_health_care", "access_to", "access"],
     "frequency":           ["frequency_of_visits", "frequency,", "frequency", "visit"],
     "affordability":       ["affordability", "afford", "affordabilit"],
@@ -248,7 +258,7 @@ def prepare_ses(df: pd.DataFrame, train_idx=None):
     # bands on TRAIN rows
     def _bands(col_key, new_name):
         col = ses_map.get(col_key)
-        if col is None or col not in df2.columns:
+        if col is None or col not in df2.columns: 
             return None
         idx = train_idx if train_idx is not None else df2.index
         s = df2.loc[idx, col].apply(_num).dropna()
@@ -462,7 +472,6 @@ def lines_for_behavior(name, val, tier):
     if name == "mouth_rinse":
         out += [f"Add a **fluoride mouthrinse**: {plan['rinse']}." if v in {"no","unknown"}
                 else f"Continue **fluoride mouthrinse**: {plan['rinse']}."]
-
     if name == "snacks_frequency":
         if any(k in v for k in ["3+",">2","many","often","frequent"]):
             out += ["**Cut snacks to ≤1–2/day**; keep sweets **with meals**.", plan["diet_focus"]]
@@ -498,7 +507,6 @@ def lines_for_behavior(name, val, tier):
     if name == "sticky_food":
         if v in {"yes","y"}:
             out += ["Avoid **sticky foods**; if eaten, **rinse with water** and avoid bedtime intake."]
-
     if name == "salivary_ph":
         if "low" in v:
             out += ["**Low pH**: use **sugar-free gum** (xylitol), avoid acids between meals, increase hydration.",
@@ -560,6 +568,7 @@ def build_options_from_df(df: pd.DataFrame, cols):
         if c in df.columns:
             vals = df[c].dropna().astype(str).unique().tolist()
             vals = sorted(vals, key=lambda s: (s == "Unknown", s))
+            # apply friendly preferred order when applicable
             pref = PREFERRED_ORDER.get(c)
             if pref:
                 seen = set()
@@ -573,148 +582,6 @@ def build_options_from_df(df: pd.DataFrame, cols):
 
 def default_from_df(df: pd.DataFrame, col: str) -> str:
     return _mode_or_unknown(df[col]) if col in df.columns else "Unknown"
-
-# ======================= AI: SES → Behaviour model ==========================
-def _ses_feature_lists(df: pd.DataFrame, ses_cols_ui: list[str]):
-    ses_cols_ui = [c for c in ses_cols_ui if c in df.columns]
-    cat_ses = [c for c in ses_cols_ui if df[c].dtype == "object"]
-    num_ses = [c for c in ses_cols_ui if c not in cat_ses]
-    return num_ses, cat_ses
-
-def _build_ses2beh_pipeline(num_ses, cat_ses):
-    transformers = []
-    if num_ses:
-        transformers.append(("num", SimpleImputer(strategy="median"), num_ses))
-    if cat_ses:
-        transformers.append(("cat", make_ohe(), cat_ses))
-    pre = ColumnTransformer(transformers, remainder="drop",
-                            verbose_feature_names_out=True)
-    clf = RandomForestClassifier(n_estimators=300, random_state=42, n_jobs=-1)
-    pipe = Pipeline([("pre", pre), ("clf", clf)])
-    return pipe
-
-def _group_tree_importances_ses(trans_names, num_cols, cat_cols, importances):
-    grouped = {}
-    for i, name in enumerate(trans_names):
-        if name.startswith("num__"):
-            orig = name[len("num__"):]
-        elif name.startswith("cat__"):
-            orig = None
-            for c in cat_cols:
-                pref = f"cat__{c}_"
-                if name.startswith(pref): orig = c; break
-            if orig is None: orig = name
-        else:
-            orig = name
-        grouped.setdefault(orig, 0.0)
-        grouped[orig] += float(importances[i])
-    s = sum(grouped.values()) or 1.0
-    for k in grouped: grouped[k] /= s
-    return sorted(grouped.items(), key=lambda kv: kv[1], reverse=True)
-
-def _behaviour_levels_table(df: pd.DataFrame, beh_col: str, ses_col: str):
-    dfx = df[[ses_col, beh_col]].copy()
-    for c in [ses_col, beh_col]:
-        dfx[c] = dfx[c].astype(str).replace({"nan":"Unknown","None":"Unknown"}).fillna("Unknown")
-    counts = pd.crosstab(dfx[ses_col], dfx[beh_col]).sort_index()
-    shares = (counts.T / counts.sum(axis=1)).T.fillna(0.0)
-    return counts, shares
-
-def _ai_summary_for_behaviour(beh_name: str, metrics: dict,
-                              top_items: list[tuple[str, float]],
-                              dist_wide: pd.DataFrame) -> list[str]:
-    bullets = []
-    acc, f1m = metrics["acc"], metrics["f1_macro"]
-    if acc < 0.5 and f1m < 0.5:
-        bullets.append(f"SES appears to be a **weak predictor** of *{beh_name}* "
-                       f"(accuracy {acc:.2f}, macro-F1 {f1m:.2f}).")
-    else:
-        bullets.append(f"SES **predicts** *{beh_name}* with accuracy **{acc:.2f}** "
-                       f"and macro-F1 **{f1m:.2f}**.")
-    if top_items:
-        drivers = ", ".join([f"**{k}**" for k, _ in top_items[:3]])
-        bullets.append(f"Top SES drivers for *{beh_name}* (global importances): {drivers}.")
-    try:
-        unequal_col = dist_wide.var(axis=0).sort_values(ascending=False).index[0]
-        worst_row = dist_wide[unequal_col].idxmax()
-        bullets.append(
-            f"The category **{unequal_col}** is most unequal across SES; "
-            f"highest share occurs in **{worst_row}**."
-        )
-    except Exception:
-        pass
-    return bullets
-
-def render_ai_ses_to_behaviour(df: pd.DataFrame, beh_cols: list[str], ses_cols_ui: list[str]) -> None:
-    with st.expander("🤖 AI: How SES predicts behaviours (model + importances + auto-insights)", expanded=False):
-        if not beh_cols or not ses_cols_ui:
-            st.info("Add at least one behaviour and one SES column to use this section.")
-            return
-
-        c1, c2 = st.columns(2)
-        with c1:
-            beh_pick = st.selectbox("Choose a behaviour to model", beh_cols, key="ai_beh_pick")
-        with c2:
-            ses_pick = st.multiselect("SES predictors (choose ≥1)", ses_cols_ui, default=ses_cols_ui, key="ai_ses_picks")
-
-        if not ses_pick:
-            st.warning("Select at least one SES predictor.")
-            return
-
-        num_ses, cat_ses = _ses_feature_lists(df, ses_pick)
-
-        y_series = df[beh_pick].astype(str).replace({"nan":"Unknown","None":"Unknown"}).fillna("Unknown")
-        le = LabelEncoder()
-        y = le.fit_transform(y_series.values)
-
-        X = df[num_ses + cat_ses].copy()
-        X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.25, random_state=42, stratify=y)
-
-        pipe = _build_ses2beh_pipeline(num_ses, cat_ses)
-        pipe.fit(X_tr, y_tr)
-        y_pred = pipe.predict(X_te)
-
-        metrics = {
-            "acc": accuracy_score(y_te, y_pred),
-            "f1_macro": f1_score(y_te, y_pred, average="macro", zero_division=0),
-            "classes": list(le.classes_)
-        }
-
-        st.success(f"Trained SES→*{beh_pick}* model · Accuracy **{metrics['acc']:.2f}**, "
-                   f"Macro-F1 **{metrics['f1_macro']:.2f}** • Classes: {', '.join(metrics['classes'])}")
-
-        clf = pipe.named_steps["clf"]
-        pre = pipe.named_steps["pre"]
-        trans_names = pre.get_feature_names_out().tolist()
-        gitems = _group_tree_importances_ses(trans_names, num_ses, cat_ses, clf.feature_importances_)[:15]
-
-        figI, axI = plt.subplots()
-        axI.bar([k for k, _ in gitems], [v for _, v in gitems])
-        axI.set_xticklabels([k for k, _ in gitems], rotation=45, ha="right")
-        axI.set_ylabel("Relative importance (grouped)")
-        axI.set_title(f"Global SES drivers for {beh_pick}")
-        figI.tight_layout()
-        st.pyplot(figI); plt.close(figI)
-
-        ses_for_dist = st.selectbox("Inspect distribution across a single SES variable",
-                                    ses_pick, key="ai_ses_dist_pick")
-        _, wide = _behaviour_levels_table(df, beh_pick, ses_for_dist)
-
-        figD, axD = plt.subplots()
-        wide.plot(kind="bar", stacked=True, ax=axD)
-        axD.set_ylabel("Proportion within SES level")
-        axD.set_xlabel(ses_for_dist)
-        axD.set_title(f"{beh_pick} distribution by {ses_for_dist}")
-        axD.legend(title=beh_pick, bbox_to_anchor=(1.02, 1), loc="upper left")
-        figD.tight_layout()
-        st.pyplot(figD); plt.close(figD)
-
-        st.markdown("**Distribution table (percent)**")
-        st.dataframe((wide * 100).round(1).add_suffix(" %"))
-
-        st.markdown("### 💡 AI summary")
-        for b in _ai_summary_for_behaviour(beh_pick, metrics, gitems, wide):
-            st.markdown(f"- {b}")
 
 # =============================== UI ===============================
 st.title("🦷 Dental AI Coach: Behaviours → Explainable Index + Advice")
@@ -874,6 +741,7 @@ with st.expander("See features used for training & current selections"):
     st.caption(f"Income q34/q67: {ses_meta['income_quantiles']} · Pocket q34/q67: {ses_meta['pocket_quantiles']}")
 
 # ------------------------ INPUT UI (patient) -----------------------
+# Elham counts input (only those present)
 st.subheader("Enter Elham Index (counts)")
 left, right = st.columns(2)
 elham_core = {}
@@ -884,6 +752,7 @@ primary_elham_fields = [
 ]
 present_elham_fields = [c for c in primary_elham_fields if c in df.columns]
 mid = len(present_elham_fields)//2
+# We'll reuse num_medians from training
 for k in present_elham_fields[:mid]:
     with left:
         elham_core[k] = st.number_input(k, min_value=0, step=1, value=int(num_medians.get(k, 0)))
@@ -935,6 +804,7 @@ if st.button("Predict + Explain"):
     st.caption("Adjust behaviours below (e.g., reduce snacks from 3+/day → 1–2/day) and see the new predicted index.")
     sim_cols = st.columns(2)
     sim_beh = {}
+    # order sliders using the same dataset-driven choices (with preferred order where defined)
     for i, c in enumerate(beh_cols):
         opts = beh_options.get(c, ["Unknown"])
         current = beh_vals.get(c, opts[0])
@@ -992,9 +862,6 @@ if st.button("Predict + Explain"):
     for line in detailed_behavior_recommendations({c: beh_vals.get(c, "") for c in beh_cols}, tier):
         st.markdown(line)
 
-# ----------------- NEW: AI section showing SES → Behaviour links ----------------
-render_ai_ses_to_behaviour(df, beh_cols, ses_cols_ui)
-
 # ----------------------- Fairness quick audit -----------------------
 with st.expander("Fairness check by SES (hold-out)"):
     if ses_cols_ui:
@@ -1005,9 +872,7 @@ with st.expander("Fairness check by SES (hold-out)"):
             yhat_a = pipe.predict(X_te_a)
             te = X_te_a.copy(); te["_y"] = y_te_a; te["_yhat"] = yhat_a
             for c in ses_cols_ui:
-                mae = te.groupby(te[c].astype(str)).apply(
-                    lambda g: float(np.mean(np.abs(g["_y"]-g["_yhat"])))
-                ).rename("MAE")
+                mae = te.groupby(te[c].astype(str)).apply(lambda g: float(np.mean(np.abs(g["_y"]-g["_yhat"])))).rename("MAE")
                 st.markdown(f"**MAE by {c}**")
                 st.dataframe(mae.sort_values().to_frame())
         except Exception as e:
