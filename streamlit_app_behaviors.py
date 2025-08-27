@@ -1,4 +1,5 @@
 # streamlit_app_behaviors.py — Dental AI Coach (Behaviours + SES + Explainability)
+# with RandomForest + XGBoost + Blend
 
 import os, re
 import numpy as np
@@ -14,6 +15,13 @@ from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.inspection import PartialDependenceDisplay
+
+# Try XGBoost
+try:
+    from xgboost import XGBRegressor
+    XGB_OK = True
+except Exception:
+    XGB_OK = False
 
 # ============================ CONFIG =============================
 st.set_page_config(page_title="Dental AI Coach · Behaviours + SES", page_icon="🦷", layout="wide")
@@ -41,7 +49,6 @@ ELHAM_FIELDS_PRESENT = [
 ]
 
 def compute_elham_from_inputs(values_dict: dict):
-    """Sum only the fields that exist in the UI for the current dataset."""
     per_item = {}
     total = 0.0
     for k in ELHAM_FIELDS_PRESENT:
@@ -258,12 +265,11 @@ SES_NORMALIZERS = {
 def prepare_ses(df: pd.DataFrame, train_idx=None):
     df2 = df.copy()
     ses_map = find_cols(df2)
-    # normalize text SES
+
     for key, col in ses_map.items():
         if col is not None and key in SES_NORMALIZERS and col in df2.columns:
             df2[col] = df2[col].apply(SES_NORMALIZERS[key])
 
-    # bands on TRAIN rows
     def _bands(col_key, new_name):
         col = ses_map.get(col_key)
         if col is None or col not in df2.columns:
@@ -291,7 +297,6 @@ def prepare_ses(df: pd.DataFrame, train_idx=None):
     inc_qs = _bands("average_income", "income_band")
     pok_qs = _bands("pocket_money",  "pocket_band")
 
-    # collect SES categorical columns
     ses_cat_cols = []
     for key in ["school","grade","house_ownership","i_live_with",
                 "father_s_education","mother_s_education",
@@ -303,7 +308,6 @@ def prepare_ses(df: pd.DataFrame, train_idx=None):
     if "income_band" in df2.columns: ses_cat_cols.append("income_band")
     if "pocket_band" in df2.columns: ses_cat_cols.append("pocket_band")
 
-    # raw numeric SES to drop (we use bands instead)
     raw_numeric_drop = []
     for key in ["average_income","pocket_money"]:
         col = ses_map.get(key)
@@ -352,7 +356,6 @@ def tier_plan(tier):
 
 # ======== RULE-BASED TREATMENT PLAN FROM ELHAM FINDINGS ==========
 def treatment_plan_from_elham(counts: dict, tier: str):
-    """Build a concise plan based on per-tooth findings + tier."""
     n = lambda k: int(counts.get(k, 0) or 0)
     out = []
     plan = tier_plan(tier)
@@ -372,7 +375,6 @@ def treatment_plan_from_elham(counts: dict, tier: str):
         ]
     if n("filled_2") > 0:
         out += [f"• **{n('filled_2')}** restoration(s) → check margins; repair/polish if needed."]
-
     if n("hypoplasia_3") > 0 or n("hypocalcification_4") > 0:
         out += [
             f"• Enamel defects (hypoplasia: {n('hypoplasia_3')}, hypocalcification: {n('hypocalcification_4')}) →",
@@ -380,27 +382,18 @@ def treatment_plan_from_elham(counts: dict, tier: str):
         ]
     if n("fluorosis_5") > 0:
         out += [f"• **Fluorosis** ({n('fluorosis_5')}) → microabrasion ± external bleaching."]
-
     if n("erosion_6") > 0:
-        out += [
-            f"• **Erosion** ({n('erosion_6')}) → acid control, straw use, rinse water; high-fluoride paste; restore if dentin exposed."
-        ]
+        out += [f"• **Erosion** ({n('erosion_6')}) → acid control, straw use, rinse water; high-fluoride paste; restore if dentin exposed."]
     if n("abrasion_7") > 0:
-        out += [
-            f"• **Abrasion** ({n('abrasion_7')}) → brushing technique coaching; soft brush; desensitizing paste; restore if needed."
-        ]
+        out += [f"• **Abrasion** ({n('abrasion_7')}) → brushing technique coaching; soft brush; desensitizing paste; restore if needed."]
     if n("attrition_8") > 0:
-        out += [
-            f"• **Attrition** ({n('attrition_8')}) → assess parafunction; **night guard** consideration; restore worn facets if indicated."
-        ]
+        out += [f"• **Attrition** ({n('attrition_8')}) → assess parafunction; **night guard** consideration; restore worn facets if indicated."]
     if n("abfraction_9") > 0:
         out += [f"• **Abfraction** ({n('abfraction_9')}) → manage occlusal load; restore if sensitive or deep."]
     if n("fractured_h") > 0:
         out += [f"• **Fracture** ({n('fractured_h')}) → immediate protection; definitive onlay/crown after assessment."]
-
     if n("sealant_a") > 0:
         out += [f"• **Sealants** present ({n('sealant_a')}) → check retention; re-seal where partial loss."]
-
     if n("missing_0_including_wisdom_") > 0:
         out += [f"• **Missing teeth** (incl. wisdom): {n('missing_0_including_wisdom_')} → discuss replacement needs."]
     if n("crown_pontic") > 0 or n("crown_abutment") > 0:
@@ -409,7 +402,6 @@ def treatment_plan_from_elham(counts: dict, tier: str):
         out += [f"• **Implant crowns** ({n('crown_implant')}) → implant maintenance; peri-implant screening."]
     if n("veneer_f") > 0:
         out += [f"• **Veneers** ({n('veneer_f')}) → hygiene at margins; composite repair if chipping."]
-
     out += ["—", "• Reinforce personalized diet & hygiene education (see behaviour section).", f"• Recall per tier: **{plan['recall']}**."]
     return out
 
@@ -435,16 +427,30 @@ def split_feature_types(df: pd.DataFrame):
         st.stop()
     return num_cols, cat_cols
 
-def build_pipeline(num_cols, cat_cols):
-    transformers = [("num", SimpleImputer(strategy="median"), num_cols)]
-    if len(cat_cols) > 0:
-        transformers.append(("cat", make_ohe(), cat_cols))
-    pre = ColumnTransformer(transformers, remainder="drop", verbose_feature_names_out=True)
+def build_rf_pipeline(num_cols, cat_cols):
+    pre = ColumnTransformer(
+        [("num", SimpleImputer(strategy="median"), num_cols)] +
+        ([("cat", make_ohe(), cat_cols)] if len(cat_cols)>0 else []),
+        remainder="drop", verbose_feature_names_out=True
+    )
     reg = RandomForestRegressor(n_estimators=450, random_state=42, n_jobs=-1)
     return Pipeline([("pre", pre), ("reg", reg)])
 
+def build_xgb_pipeline(num_cols, cat_cols):
+    pre = ColumnTransformer(
+        [("num", SimpleImputer(strategy="median"), num_cols)] +
+        ([("cat", make_ohe(), cat_cols)] if len(cat_cols)>0 else []),
+        remainder="drop", verbose_feature_names_out=True
+    )
+    reg = XGBRegressor(
+        n_estimators=600, learning_rate=0.05, max_depth=5,
+        subsample=0.9, colsample_bytree=0.9, reg_lambda=1.0,
+        random_state=42, n_jobs=-1, tree_method="hist"
+    )
+    return Pipeline([("pre", pre), ("reg", reg)])
+
 @st.cache_resource(show_spinner=False)
-def train_model(df: pd.DataFrame, cat_cols_override=None, drop_num_cols=None):
+def train_models(df: pd.DataFrame, cat_cols_override=None, drop_num_cols=None):
     num_cols, beh_cat_cols = split_feature_types(df)
     if drop_num_cols:
         num_cols = [c for c in num_cols if c not in set(drop_num_cols)]
@@ -453,20 +459,38 @@ def train_model(df: pd.DataFrame, cat_cols_override=None, drop_num_cols=None):
     X = df[num_cols + cat_cols].copy()
     y = df[TARGET_COL].astype(float).values
 
-    pipe = build_pipeline(num_cols, cat_cols)
     X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
-    pipe.fit(X_tr, y_tr)
-    y_pred = pipe.predict(X_te)
-    metrics = {"R2": float(r2_score(y_te, y_pred)), "MAE": float(mean_absolute_error(y_te, y_pred))}
 
-    pre = pipe.named_steps["pre"]
-    feat_names = pre.get_feature_names_out().tolist()
+    rf_pipe = build_rf_pipeline(num_cols, cat_cols)
+    rf_pipe.fit(X_tr, y_tr)
+    y_rf = rf_pipe.predict(X_te)
+    metrics_rf = {"R2": float(r2_score(y_te, y_rf)), "MAE": float(mean_absolute_error(y_te, y_rf))}
+
+    if XGB_OK:
+        xgb_pipe = build_xgb_pipeline(num_cols, cat_cols)
+        xgb_pipe.fit(X_tr, y_tr)
+        y_xgb = xgb_pipe.predict(X_te)
+        metrics_xgb = {"R2": float(r2_score(y_te, y_xgb)), "MAE": float(mean_absolute_error(y_te, y_xgb))}
+        y_blend = 0.5*(y_rf + y_xgb)
+        metrics_blend = {"R2": float(r2_score(y_te, y_blend)), "MAE": float(mean_absolute_error(y_te, y_blend))}
+    else:
+        xgb_pipe = None
+        metrics_xgb = None
+        metrics_blend = None
+
+    # shared stuff
+    feat_names = rf_pipe.named_steps["pre"].get_feature_names_out().tolist()
     num_medians = X[num_cols].median(numeric_only=True)
     cat_modes   = {c: (X[c].mode(dropna=True).iloc[0] if X[c].notna().any() else "Unknown") for c in cat_cols}
     cat_values  = {c: sorted(X[c].dropna().astype(str).unique().tolist(), key=lambda s: (s=="Unknown", s)) for c in cat_cols}
     risk_bins   = build_risk_bins(df, TARGET_COL)
 
-    return pipe, metrics, num_cols, cat_cols, feat_names, num_medians, cat_modes, cat_values, risk_bins
+    metrics_all = {"RandomForest": metrics_rf}
+    if XGB_OK:
+        metrics_all["XGBoost"] = metrics_xgb
+        metrics_all["Blend (avg RF+XGB)"] = metrics_blend
+
+    return rf_pipe, xgb_pipe, metrics_all, num_cols, cat_cols, feat_names, num_medians, cat_modes, cat_values, risk_bins
 
 # ======== SHAP GROUPING + SMALL PLOTTING HELPERS ==================
 def build_group_map(feature_names, num_cols, cat_cols):
@@ -477,8 +501,8 @@ def build_group_map(feature_names, num_cols, cat_cols):
         elif name.startswith("cat__"):
             orig = None
             for c in cat_cols:
-                prefix = f"cat__{c}_"
-                if name.startswith(prefix):
+                pref = f"cat__{c}_"
+                if name.startswith(pref):
                     orig = c; break
             if orig is None:
                 orig = name
@@ -501,7 +525,7 @@ def plot_bar(items, title):
     fig, ax = plt.subplots()
     ax.bar([k for k, _ in items], [v for _, v in items])
     ax.set_xticklabels([k for k, _ in items], rotation=45, ha="right")
-    ax.set_ylabel("Grouped SHAP value")
+    ax.set_ylabel("Grouped value")
     ax.set_title(title)
     fig.tight_layout()
     st.pyplot(fig)
@@ -522,15 +546,11 @@ def lines_for_behavior(name, val, tier):
     v = (str(val) if val is not None else "Unknown").strip().lower()
     plan = tier_plan(tier)
     out = []
-
     if name == "tooth_brushing_frequency":
         if v in {"1/day","once","1"}:
-            out += [
-                "Brush **twice daily** with fluoride toothpaste.",
-                plan["toothpaste"],
-                "Use a **pea-sized** amount; spit, don’t rinse after brushing.",
-                "Consider an **electric brush** if plaque control is sub-optimal."
-            ]
+            out += ["Brush **twice daily** with fluoride toothpaste.", plan["toothpaste"],
+                    "Use a **pea-sized** amount; spit, don’t rinse after brushing.",
+                    "Consider an **electric brush** if plaque control is sub-optimal."]
         elif v in {"irregular","sometimes"}:
             out += ["Set **fixed times** for brushing (morning & before bed).", plan["toothpaste"]]
         else:
@@ -650,11 +670,12 @@ def default_from_df(df: pd.DataFrame, col: str) -> str:
 # =============================== UI ===============================
 st.title("🦷 Dental AI Coach: Behaviours → Explainable Index + Advice")
 
-# Optional dev helper: clear caches after changing SES rules
+if not XGB_OK:
+    st.caption("ℹ️ XGBoost not installed — using RandomForest only. To enable blend, `pip install xgboost`.")
+
+# Dev helper
 if st.button("🔁 Force clear cache (use after changing SES rules)"):
-    st.cache_data.clear()
-    st.cache_resource.clear()
-    st.experimental_rerun()
+    st.cache_data.clear(); st.cache_resource.clear(); st.experimental_rerun()
 
 df = load_data(DATA_PATH)
 
@@ -669,11 +690,42 @@ beh_options  = build_options_from_df(df, beh_cols)
 ses_cols_ui  = [c for c in cat_cols_all if c not in beh_cols]
 ses_options  = build_options_from_df(df, ses_cols_ui)
 
-# Train with SES included; drop raw numeric SES in favour of bands
-pipe, metrics, num_cols, all_cat_cols, feat_names, num_medians, cat_modes, cat_values, risk_bins = \
-    train_model(df, cat_cols_override=cat_cols_all, drop_num_cols=raw_numeric_ses)
+# Train models (RF, XGB, Blend)
+rf_pipe, xgb_pipe, metrics_all, num_cols, all_cat_cols, feat_names, num_medians, cat_modes, cat_values, risk_bins = \
+    train_models(df, cat_cols_override=cat_cols_all, drop_num_cols=raw_numeric_ses)
 
-st.success(f"Model ready · R² = {metrics['R2']:.3f} · MAE = {metrics['MAE']:.2f}")
+# Model selector
+model_choices = ["RandomForest"]
+if XGB_OK: model_choices += ["XGBoost", "Blend (avg RF+XGB)"]
+default_choice = "Blend (avg RF+XGB)" if XGB_OK else "RandomForest"
+model_choice = st.selectbox("Model to use", options=model_choices, index=model_choices.index(default_choice))
+
+# Show metrics
+mcols = st.columns(len(model_choices))
+for i, name in enumerate(model_choices):
+    m = metrics_all[name]
+    with mcols[i]:
+        st.metric(name, f"R² {m['R2']:.3f}", delta=f"MAE {m['MAE']:.2f}")
+
+def predict_with_choice(X):
+    if model_choice == "RandomForest":
+        return rf_pipe.predict(X)
+    elif model_choice == "XGBoost" and XGB_OK:
+        return xgb_pipe.predict(X)
+    else:  # Blend
+        if XGB_OK:
+            return 0.5*(rf_pipe.predict(X) + xgb_pipe.predict(X))
+        return rf_pipe.predict(X)
+
+def active_pipe_for_explain():
+    # Use the chosen model; for Blend, pick the better single model (higher R²) for SHAP/PDP
+    if model_choice == "RandomForest" or not XGB_OK:
+        return rf_pipe, "RandomForest"
+    if model_choice == "XGBoost":
+        return xgb_pipe, "XGBoost"
+    # Blend → choose best by R²
+    best = max(("RandomForest","XGBoost"), key=lambda k: metrics_all[k]["R2"])
+    return (rf_pipe if best=="RandomForest" else xgb_pipe), best
 
 # ========================= MODEL VISUALIZATIONS ===================
 st.subheader("Model visualizations")
@@ -682,22 +734,16 @@ X_all = df[num_cols + all_cat_cols].copy()
 y_all = df[TARGET_COL].astype(float).values
 X_tr_v, X_te_v, y_tr_v, y_te_v = train_test_split(X_all, y_all, test_size=0.2, random_state=42)
 
-VIS_SAMPLE_MAX = 400
-PDP_GRID       = 15
-
+VIS_SAMPLE_MAX = 400; PDP_GRID = 15
 if len(X_te_v) > VIS_SAMPLE_MAX:
-    X_te_s = X_te_v.sample(VIS_SAMPLE_MAX, random_state=42)
-    idx = X_te_s.index
-    y_te_s = y_te_v[idx]
+    X_te_s = X_te_v.sample(VIS_SAMPLE_MAX, random_state=42); idx = X_te_s.index; y_te_s = y_te_v[idx]
 else:
     X_te_s, y_te_s = X_te_v, y_te_v
 
-y_pred_s = pipe.predict(X_te_s)
+y_pred_s = predict_with_choice(X_te_s)
 resid_s  = y_te_s - y_pred_s
 
-tab_perf, tab_imp, tab_beh, tab_pdp = st.tabs(
-    ["📈 Performance", "⭐ Global importance", "🧠 Behaviour effects", "🧩 PDP / ICE"]
-)
+tab_perf, tab_imp, tab_beh, tab_pdp = st.tabs(["📈 Performance", "⭐ Global importance", "🧠 Behaviour effects", "🧩 PDP / ICE"])
 
 with tab_perf:
     with st.spinner("Drawing performance plots..."):
@@ -706,30 +752,37 @@ with tab_perf:
         lo = float(min(y_te_s.min(), y_pred_s.min()))
         hi = float(max(y_te_s.max(), y_pred_s.max()))
         ax1.plot([lo, hi], [lo, hi])
-        ax1.set_xlabel("Actual Elham Index")
-        ax1.set_ylabel("Predicted Elham Index")
+        ax1.set_xlabel("Actual Elham Index"); ax1.set_ylabel("Predicted Elham Index")
         ax1.set_title("Predicted vs Actual (sampled hold-out)")
         fig1.tight_layout(); st.pyplot(fig1); plt.close(fig1)
 
         fig2, ax2 = plt.subplots()
-        ax2.hist(resid_s, bins=30)
-        ax2.set_xlabel("Residual (Actual − Predicted)")
+        ax2.hist(resid_s, bins=30); ax2.set_xlabel("Residual (Actual − Predicted)")
         ax2.set_title("Residuals (sampled hold-out)")
         fig2.tight_layout(); st.pyplot(fig2); plt.close(fig2)
 
         fig3, ax3 = plt.subplots()
-        ax3.scatter(y_pred_s, resid_s, alpha=0.6)
-        ax3.axhline(0, linestyle="--")
-        ax3.set_xlabel("Predicted")
-        ax3.set_ylabel("Residual")
+        ax3.scatter(y_pred_s, resid_s, alpha=0.6); ax3.axhline(0, linestyle="--")
+        ax3.set_xlabel("Predicted"); ax3.set_ylabel("Residual")
         ax3.set_title("Residuals vs Predicted (sampled hold-out)")
         fig3.tight_layout(); st.pyplot(fig3); plt.close(fig3)
 
 with tab_imp:
     try:
-        reg = pipe.named_steps["reg"]
-        pre = pipe.named_steps["pre"]
-        trans_names = pre.get_feature_names_out().tolist()
+        if model_choice == "XGBoost" and XGB_OK:
+            importances = xgb_pipe.named_steps["reg"].feature_importances_
+            trans_names = xgb_pipe.named_steps["pre"].get_feature_names_out().tolist()
+        elif model_choice == "Blend (avg RF+XGB)" and XGB_OK:
+            imp_rf  = rf_pipe.named_steps["reg"].feature_importances_
+            imp_xgb = xgb_pipe.named_steps["reg"].feature_importances_
+            imp_rf  = imp_rf / (imp_rf.sum()  + 1e-12)
+            imp_xgb = imp_xgb/ (imp_xgb.sum() + 1e-12)
+            importances = 0.5*(imp_rf + imp_xgb)
+            trans_names = rf_pipe.named_steps["pre"].get_feature_names_out().tolist()
+        else:
+            importances = rf_pipe.named_steps["reg"].feature_importances_
+            trans_names = rf_pipe.named_steps["pre"].get_feature_names_out().tolist()
+
         def _group_importances(trans_names, num_cols, cat_cols, importances):
             grouped = {}
             for i, name in enumerate(trans_names):
@@ -737,7 +790,7 @@ with tab_imp:
                     orig = name[len("num__"):]
                 elif name.startswith("cat__"):
                     orig = None
-                    for c in cat_cols:
+                    for c in all_cat_cols:
                         pref = f"cat__{c}_"
                         if name.startswith(pref): orig = c; break
                     if orig is None: orig = name
@@ -746,12 +799,12 @@ with tab_imp:
                 grouped.setdefault(orig, 0.0)
                 grouped[orig] += float(importances[i])
             return sorted(grouped.items(), key=lambda kv: kv[1], reverse=True)
-        gitems = _group_importances(trans_names, num_cols, all_cat_cols, reg.feature_importances_)[:20]
+
+        gitems = _group_importances(trans_names, num_cols, all_cat_cols, importances)[:20]
         fig5, ax5 = plt.subplots()
         ax5.bar([k for k, _ in gitems], [v for _, v in gitems])
         ax5.set_xticklabels([k for k, _ in gitems], rotation=45, ha="right")
-        ax5.set_ylabel("Grouped importance (sum)")
-        ax5.set_title("Model internal importances (top 20)")
+        ax5.set_ylabel("Grouped importance (sum)"); ax5.set_title("Model importances (top 20)")
         fig5.tight_layout(); st.pyplot(fig5); plt.close(fig5)
     except Exception as e:
         st.info(f"Importances not available: {e}")
@@ -776,8 +829,7 @@ with tab_beh:
             fig6, ax6 = plt.subplots()
             ax6.bar([k for k, _ in means], [v for _, v in means])
             ax6.set_xticklabels([k for k, _ in means], rotation=45, ha="right")
-            ax6.set_ylabel("Mean predicted index")
-            ax6.set_title(f"{beh_choice}: mean predicted index by category")
+            ax6.set_ylabel("Mean predicted index"); ax6.set_title(f"{beh_choice}: mean predicted index by category")
             fig6.tight_layout(); st.pyplot(fig6); plt.close(fig6)
             st.write("**Levels shown (top by frequency):**", ", ".join(levels))
 
@@ -786,12 +838,11 @@ with tab_pdp:
     do_pdp = st.toggle("Compute PDP / ICE (fast mode)", value=False)
     if do_pdp:
         try:
+            active_pipe, active_name = active_pipe_for_explain()
             pick = st.selectbox("Numeric feature", options=(num_cols[:3] if len(num_cols) >= 3 else num_cols))
             fig7, ax7 = plt.subplots()
-            PartialDependenceDisplay.from_estimator(
-                pipe, X_te_s, features=[pick], kind="average", grid_resolution=PDP_GRID, ax=ax7
-            )
-            ax7.set_title(f"PDP · {pick} (sampled)")
+            PartialDependenceDisplay.from_estimator(active_pipe, X_te_s, features=[pick], kind="average", grid_resolution=PDP_GRID, ax=ax7)
+            ax7.set_title(f"PDP · {pick} (sampled) · {active_name}")
             fig7.tight_layout(); st.pyplot(fig7); plt.close(fig7)
         except Exception as e:
             st.info(f"PDP unavailable: {e}")
@@ -808,9 +859,8 @@ with st.expander("See features used for training & current selections"):
 st.subheader("Enter Elham Index (counts)")
 left, right = st.columns(2)
 elham_core = {}
-present_elham_fields = [c for c in ELHAM_FIELDS_PRESENT if c in df.columns]  # safe subset
+present_elham_fields = [c for c in ELHAM_FIELDS_PRESENT if c in df.columns]
 mid = len(present_elham_fields)//2
-
 for k in present_elham_fields[:mid]:
     with left:
         elham_core[k] = st.number_input(k, min_value=0, step=1, value=int(df[k].median() if k in df.columns else 0))
@@ -830,7 +880,6 @@ for i, c in enumerate(beh_cols):
 
 # SES UI (dataset-driven)
 ses_vals = {}
-ses_cols_ui  = [c for c in cat_cols_all if c not in beh_cols]
 if ses_cols_ui:
     st.subheader("Socio-economic inputs")
     grid = st.columns(2)
@@ -845,7 +894,7 @@ with st.expander("Your current selections"):
 
 # ------------------------- PREDICT & EXPLAIN -----------------------
 if st.button("Predict + Explain"):
-    # Build one-row input for the model — use dataset-driven choices directly (no re-normalizing here)
+    # Build one-row input
     num_cols_current = [c for c in num_cols if c in df.columns]
     X_row = {c: float(elham_core.get(c, df[c].median() if c in df.columns else 0)) for c in num_cols_current}
     for c in beh_cols:
@@ -854,15 +903,15 @@ if st.button("Predict + Explain"):
         X_row[c] = ses_vals.get(c, default_from_df(df, c))
     X_df = pd.DataFrame([X_row])
 
-    # 1) Compute Elham index from your entered counts (ground truth for tiering)
+    # 1) Compute Elham index from your entered counts (for tiering)
     entered_index, per_item = compute_elham_from_inputs(elham_core)
     st.info(f"**Computed Elham’s Index (from your inputs): {entered_index:.0f}**")
 
-    # 2) ML prediction (for explainability & what-if)
-    y_hat = float(pipe.predict(X_df)[0])
-    st.success(f"Model prediction of Elham Index: **{y_hat:.2f}**")
+    # 2) ML prediction (chosen model)
+    y_hat = float(predict_with_choice(X_df)[0])
+    st.success(f"Model prediction of Elham Index ({model_choice}): **{y_hat:.2f}**")
 
-    # 3) Risk tier from the computed index
+    # 3) Risk tier from computed index
     tier = index_tier(entered_index, risk_bins)
     st.info(f"Risk tier based on computed Elham Index: **{tier.title()}**")
 
@@ -871,7 +920,7 @@ if st.button("Predict + Explain"):
     for line in treatment_plan_from_elham(per_item, tier):
         st.markdown(line)
 
-    # ---------------------- WHAT-IF SIMULATOR (behaviours) ----------------------
+    # ---------------------- WHAT-IF SIMULATOR ----------------------
     st.subheader("🧪 What-if simulator (behaviours)")
     st.caption("Adjust behaviours (e.g., 3+/day snacks → 1–2/day) and see model re-prediction.")
     sim_cols = st.columns(2)
@@ -889,7 +938,7 @@ if st.button("Predict + Explain"):
     X_row_sim = X_row.copy()
     for c in beh_cols: X_row_sim[c] = sim_beh[c]
     X_df_sim = pd.DataFrame([X_row_sim])
-    y_sim = float(pipe.predict(X_df_sim)[0])
+    y_sim = float(predict_with_choice(X_df_sim)[0])
     delta = y_sim - y_hat
 
     c1, c2 = st.columns(2)
@@ -903,23 +952,24 @@ if st.button("Predict + Explain"):
     # ----------------- SHAP explanations (grouped) ----------------
     try:
         import shap
-        pre = pipe.named_steps["pre"]
+        active_pipe, active_name = active_pipe_for_explain()
+        pre = active_pipe.named_steps["pre"]
         X_trans = pre.transform(X_df)
-        explainer = shap.TreeExplainer(pipe.named_steps["reg"])
+        explainer = shap.TreeExplainer(active_pipe.named_steps["reg"])
         shap_vals = explainer.shap_values(X_trans)
 
-        grouped = group_shap_by_original(feat_names, shap_vals, num_cols, all_cat_cols)
+        feat_names_active = pre.get_feature_names_out().tolist()
+        grouped = group_shap_by_original(feat_names_active, shap_vals, num_cols, all_cat_cols)
 
-        st.subheader("Top drivers of prediction (all features)")
-        top_all = grouped[:14]
-        plot_bar(top_all, "Top drivers of prediction")
+        st.subheader(f"Top drivers of prediction (SHAP · {active_name})")
+        top_all = grouped[:14]; plot_bar(top_all, "Top drivers of prediction")
 
         st.subheader("Behaviour drivers of the predicted index")
         beh_only = [(k, v) for k, v in grouped if k in beh_cols]
         beh_only = sorted(beh_only, key=lambda kv: abs(kv[1]), reverse=True)[:12]
         plot_bar(beh_only, "Behaviour features (grouped SHAP)")
 
-        if ses_cols_ui:
+        if len(ses_cols_ui):
             st.subheader("Socio-economic drivers of the predicted index")
             ses_only = [(k, v) for k, v in grouped if k in ses_cols_ui]
             ses_only = sorted(ses_only, key=lambda kv: abs(kv[1]), reverse=True)[:10]
@@ -934,17 +984,16 @@ if st.button("Predict + Explain"):
 
 # ----------------------- Fairness quick audit -----------------------
 with st.expander("Fairness check by SES (hold-out)"):
-    if ses_cols_ui:
+    if len(ses_cols_ui):
         try:
             X_all = df[num_cols + all_cat_cols].copy()
             y_all = df[TARGET_COL].astype(float).values
             X_tr_a, X_te_a, y_tr_a, y_te_a = train_test_split(X_all, y_all, test_size=0.2, random_state=42)
-            yhat_a = pipe.predict(X_te_a)
+            yhat_a = predict_with_choice(X_te_a)
             te = X_te_a.copy(); te["_y"] = y_te_a; te["_yhat"] = yhat_a
             for c in ses_cols_ui:
                 mae = te.groupby(te[c].astype(str)).apply(lambda g: float(np.mean(np.abs(g["_y"]-g["_yhat"])))).rename("MAE")
-                st.markdown(f"**MAE by {c}**")
-                st.dataframe(mae.sort_values().to_frame())
+                st.markdown(f"**MAE by {c}**"); st.dataframe(mae.sort_values().to_frame())
         except Exception as e:
             st.caption(f"Subgroup MAE not available: {e}")
     else:
