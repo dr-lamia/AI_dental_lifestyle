@@ -7,14 +7,12 @@ import streamlit as st
 import matplotlib.pyplot as plt
 
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import (
-    r2_score, mean_absolute_error, accuracy_score, f1_score
-)
+from sklearn.metrics import r2_score, mean_absolute_error
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder
-from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.inspection import PartialDependenceDisplay
 
 # ============================ CONFIG =============================
@@ -107,7 +105,7 @@ def normalize_cats(df: pd.DataFrame) -> pd.DataFrame:
 
 # ====================== SES HELPERS (inline) ======================
 def _t(x) -> str: return str(x).strip().lower()
-def _keep(v, default="Unknown"): 
+def _keep(v, default="Unknown"):
     s=str(v).strip()
     return s.title() if s else default
 
@@ -124,28 +122,18 @@ def _num(x):
 SES_FUZZY = {
     "school":              ["school"],
     "grade":               ["grade"],
-
-    "house_ownership": [
-        "house_owned_or_rent", "house_owi", "house_ow", "ownership", "own", "rent"
-    ],
-    "i_live_with": [
-        "i_live_with_my_parents", "i_live_with", "live_with"
-    ],
-
-    "average_income":      ["average_in", "avg_income", "family_in", "income", "household_income"],
-    "pocket_money":        ["pocket_m", "pocket_money", "allowance"],
-
-    "father_s_education":  ["father_s_e", "father edu", "father_edu"],
-    "mother_s_education":  ["mother_s_education", "mother_s_", "mother edu", "mother_edu"],
-
-    "father_s_job":        ["father_s_jc", "father_s_j", "father job", "father occ"],
-    "mother_s_job":        ["mother_s_j", "mother_s_job", "mother_s_", "mother occ", "mother job"],
-
-    "insurance":           ["insurance", "health_insurance", "dental_insurance"],
-
-    "access_to":           ["access_to_oral_health_care", "access_to", "access"],
-    "frequency":           ["frequency_of_visits", "frequency,", "frequency", "visit"],
-    "affordability":       ["affordability", "afford", "affordabilit"],
+    "house_ownership":     ["house_owned_or_rent","house_owi","house_ow","ownership","own","rent"],
+    "i_live_with":         ["i_live_with_my_parents","i_live_with","live_with"],
+    "average_income":      ["average_in","avg_income","family_in","income","household_income"],
+    "pocket_money":        ["pocket_m","pocket_money","allowance"],
+    "father_s_education":  ["father_s_e","father edu","father_edu"],
+    "mother_s_education":  ["mother_s_education","mother_s_","mother edu","mother_edu"],
+    "father_s_job":        ["father_s_jc","father_s_j","father job","father occ"],
+    "mother_s_job":        ["mother_s_j","mother_s_job","mother_s_","mother occ","mother job"],
+    "insurance":           ["insurance","health_insurance","dental_insurance"],
+    "access_to":           ["access_to_oral_health_care","access_to","access"],
+    "frequency":           ["frequency_of_visits","frequency,","frequency","visit"],
+    "affordability":       ["affordability","afford","affordabilit"],
 }
 
 def find_cols(df, fuzzy=SES_FUZZY):
@@ -260,7 +248,7 @@ def prepare_ses(df: pd.DataFrame, train_idx=None):
     # bands on TRAIN rows
     def _bands(col_key, new_name):
         col = ses_map.get(col_key)
-        if col is None or col not in df2.columns: 
+        if col is None or col not in df2.columns:
             return None
         idx = train_idx if train_idx is not None else df2.index
         s = df2.loc[idx, col].apply(_num).dropna()
@@ -344,15 +332,10 @@ def tier_plan(tier):
         diet_focus="Maintain current habits; keep sweets with meals",
     )
 
-# ==================== PREPROCESS / TRAINING =======================
+# ==================== PREPROCESS / TRAINING (single) ==============
 def make_ohe() -> OneHotEncoder:
-    """Return a version-safe OneHotEncoder compatible across sklearn versions."""
-    try:
-        # sklearn >= 1.2
-        return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-    except TypeError:
-        # sklearn < 1.2
-        return OneHotEncoder(handle_unknown="ignore", sparse=False)
+    try:    return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+    except TypeError: return OneHotEncoder(handle_unknown="ignore", sparse=False)
 
 @st.cache_data(show_spinner=False)
 def load_data(path: str) -> pd.DataFrame:
@@ -371,17 +354,49 @@ def split_feature_types(df: pd.DataFrame):
         st.stop()
     return num_cols, cat_cols
 
-def build_pipeline(num_cols, cat_cols):
-    transformers = [("num", SimpleImputer(strategy="median"), num_cols)]
-    if len(cat_cols) > 0:
-        transformers.append(("cat", make_ohe(), cat_cols))
-    pre = ColumnTransformer(transformers, remainder="drop",
-                            verbose_feature_names_out=True)
-    reg = RandomForestRegressor(n_estimators=450, random_state=42, n_jobs=-1)
-    return Pipeline([("pre", pre), ("reg", reg)])
+# ==================== MULTI-MODEL (RF + XGB + BLEND) ==============
+try:
+    from xgboost import XGBRegressor
+    HAS_XGB = True
+except Exception:
+    HAS_XGB = False
+
+def build_models():
+    models = {
+        "Random Forest": RandomForestRegressor(n_estimators=450, random_state=42, n_jobs=-1)
+    }
+    if HAS_XGB:
+        models["XGBoost"] = XGBRegressor(
+            n_estimators=800,
+            max_depth=6,
+            learning_rate=0.05,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            reg_lambda=1.0,
+            random_state=42,
+            n_jobs=-1,
+            tree_method="hist"
+        )
+    return models
+
+def build_risk_bins_from_train(y_tr):
+    q1, q2 = np.quantile(y_tr, [0.34, 0.67])
+    return (float(q1), float(q2))
+
+def _fit_one_model(model, num_cols, cat_cols, X_tr, y_tr, X_te, y_te):
+    pre = ColumnTransformer(
+        [("num", SimpleImputer(strategy="median"), num_cols)] +
+        ([("cat", make_ohe(), cat_cols)] if len(cat_cols) else []),
+        remainder="drop",
+        verbose_feature_names_out=True
+    )
+    pipe = Pipeline([("pre", pre), ("reg", model)])
+    pipe.fit(X_tr, y_tr)
+    y_hat = pipe.predict(X_te)
+    return pipe, float(r2_score(y_te, y_hat)), float(mean_absolute_error(y_te, y_hat))
 
 @st.cache_resource(show_spinner=False)
-def train_model(df: pd.DataFrame, cat_cols_override=None, drop_num_cols=None):
+def train_models(df: pd.DataFrame, cat_cols_override=None, drop_num_cols=None):
     num_cols, beh_cat_cols = split_feature_types(df)
     if drop_num_cols:
         num_cols = [c for c in num_cols if c not in set(drop_num_cols)]
@@ -390,21 +405,43 @@ def train_model(df: pd.DataFrame, cat_cols_override=None, drop_num_cols=None):
     X = df[num_cols + cat_cols].copy()
     y = df[TARGET_COL].astype(float).values
 
-    pipe = build_pipeline(num_cols, cat_cols)
     X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
-    pipe.fit(X_tr, y_tr)
-    y_pred = pipe.predict(X_te)
-    metrics = {"R2": float(r2_score(y_te, y_pred)),
-               "MAE": float(mean_absolute_error(y_te, y_pred))}
+    risk_bins = build_risk_bins_from_train(y_tr)  # train-only percentiles
 
-    pre = pipe.named_steps["pre"]
+    models = build_models()
+    pipes, r2_scores, mae_scores = {}, {}, {}
+
+    for name, mdl in models.items():
+        pipe, r2, mae = _fit_one_model(mdl, num_cols, cat_cols, X_tr, y_tr, X_te, y_te)
+        pipes[name] = pipe
+        r2_scores[name] = r2
+        mae_scores[name] = mae
+
+    any_pipe = next(iter(pipes.values()))
+    pre = any_pipe.named_steps["pre"]
     feat_names = pre.get_feature_names_out().tolist()
     num_medians = X[num_cols].median(numeric_only=True)
     cat_modes   = {c: (X[c].mode(dropna=True).iloc[0] if X[c].notna().any() else "Unknown") for c in cat_cols}
     cat_values  = {c: sorted(X[c].dropna().astype(str).unique().tolist(), key=lambda s: (s=="Unknown", s)) for c in cat_cols}
-    risk_bins   = build_risk_bins(df, TARGET_COL)
 
-    return pipe, metrics, num_cols, cat_cols, feat_names, num_medians, cat_modes, cat_values, risk_bins
+    # normalized weights for blend (based on R²)
+    w = {k: max(v, 0.0) for k, v in r2_scores.items()}
+    total = sum(w.values()) or 1.0
+    blend_weights = {k: v/total for k, v in w.items()}
+
+    metrics = {name: {"R2": r2_scores[name], "MAE": mae_scores[name]} for name in models.keys()}
+    return pipes, metrics, blend_weights, num_cols, cat_cols, feat_names, num_medians, cat_modes, cat_values, risk_bins
+
+def predict_with_choice(pipes, blend_weights, X_df, choice: str):
+    if choice in pipes:
+        return float(pipes[choice].predict(X_df)[0])
+    preds, weights = [], []
+    for name, pipe in pipes.items():
+        preds.append(float(pipe.predict(X_df)[0]))
+        weights.append(float(blend_weights.get(name, 0.0)))
+    if sum(weights) <= 0:
+        return float(np.mean(preds))
+    return float(np.average(preds, weights=weights))
 
 # ======== SHAP GROUPING + SMALL PLOTTING HELPERS ==================
 def build_group_map(feature_names, num_cols, cat_cols):
@@ -443,30 +480,6 @@ def plot_bar(items, title):
     ax.set_title(title)
     fig.tight_layout()
     st.pyplot(fig)
-
-# ============== Extra helpers for the SES➜Behaviour pilot =========
-def _can_stratify(y) -> bool:
-    """True if every class appears at least twice and there are >=2 classes."""
-    vc = pd.Series(y).value_counts()
-    return (vc >= 2).all() and len(vc) >= 2
-
-def _group_cat_importances(trans_names, cat_cols, importances):
-    """Sum one-hot importances back to their original categorical column."""
-    grouped = {}
-    for i, name in enumerate(trans_names):
-        if name.startswith("cat__"):
-            owner = None
-            for c in cat_cols:
-                pref = f"cat__{c}_"
-                if name.startswith(pref):
-                    owner = c
-                    break
-            owner = owner or name
-        else:
-            owner = name
-        grouped.setdefault(owner, 0.0)
-        grouped[owner] += float(importances[i])
-    return sorted(grouped.items(), key=lambda kv: kv[1], reverse=True)
 
 # =================== DETAILED ADVICE (ALL BEHAVIOURS) =============
 def tier_plan_text(tier):
@@ -618,7 +631,6 @@ def default_from_df(df: pd.DataFrame, col: str) -> str:
 # =============================== UI ===============================
 st.title("🦷 Dental AI Coach: Behaviours → Explainable Index + Advice")
 
-# Optional dev helper: clear caches after changing SES rules
 if st.button("🔁 Force clear cache (use after changing SES rules)"):
     st.cache_data.clear()
     st.cache_resource.clear()
@@ -637,13 +649,30 @@ beh_options  = build_options_from_df(df, beh_cols)
 ses_cols_ui  = [c for c in cat_cols_all if c not in beh_cols]
 ses_options  = build_options_from_df(df, ses_cols_ui)
 
-# Train with SES included; drop raw numeric SES in favour of bands
-pipe, metrics, num_cols, all_cat_cols, feat_names, num_medians, cat_modes, cat_values, risk_bins = \
-    train_model(df, cat_cols_override=cat_cols_all, drop_num_cols=raw_numeric_ses)
+# ---- Train multi-model (RF + optional XGB + Blend) ----
+pipes, metrics, blend_weights, num_cols, all_cat_cols, feat_names, num_medians, cat_modes, cat_values, train_bins = \
+    train_models(df, cat_cols_override=cat_cols_all, drop_num_cols=raw_numeric_ses)
 
-st.success(f"Model ready · R² = {metrics['R2']:.3f} · MAE = {metrics['MAE']:.2f}")
+best_name = max(metrics, key=lambda k: metrics[k]["R2"])
+st.success(
+    "Models ready · " +
+    " · ".join([f"{k}: R²={v['R2']:.3f}, MAE={v['MAE']:.2f}" for k,v in metrics.items()]) +
+    (f" · Blend weights: {', '.join([f'{k}={w:.2f}' for k,w in blend_weights.items()])}" if len(pipes) > 1 else "") +
+    f" · Risk bins (q34,q67) from TRAIN = {train_bins}"
+)
 
-# ========================= MODEL VISUALIZATIONS (FAST) =========================
+# Model picker
+model_options = list(pipes.keys())
+if len(model_options) >= 2:
+    model_options.append("Blend (R²-weighted)")
+default_index = (model_options.index("Blend (R²-weighted)") if "Blend (R²-weighted)" in model_options else 0)
+model_choice = st.radio("Model", model_options, horizontal=True, index=default_index)
+
+# choose a pipeline for visualizations/explanations
+explain_name = best_name if model_choice == "Blend (R²-weighted)" else model_choice
+pipe_vis = pipes[explain_name]
+
+# ========================= MODEL VISUALIZATIONS ===================
 st.subheader("Model visualizations")
 
 X_all = df[num_cols + all_cat_cols].copy()
@@ -660,7 +689,7 @@ if len(X_te_v) > VIS_SAMPLE_MAX:
 else:
     X_te_s, y_te_s = X_te_v, y_te_v
 
-y_pred_s = pipe.predict(X_te_s)
+y_pred_s = pipe_vis.predict(X_te_s)
 resid_s  = y_te_s - y_pred_s
 
 tab_perf, tab_imp, tab_beh, tab_pdp = st.tabs(
@@ -676,13 +705,13 @@ with tab_perf:
         ax1.plot([lo, hi], [lo, hi])
         ax1.set_xlabel("Actual Elham Index")
         ax1.set_ylabel("Predicted Elham Index")
-        ax1.set_title("Predicted vs Actual (sampled hold-out)")
+        ax1.set_title(f"Predicted vs Actual (sampled hold-out) · {explain_name}")
         fig1.tight_layout(); st.pyplot(fig1); plt.close(fig1)
 
         fig2, ax2 = plt.subplots()
         ax2.hist(resid_s, bins=30)
         ax2.set_xlabel("Residual (Actual − Predicted)")
-        ax2.set_title("Residuals (sampled hold-out)")
+        ax2.set_title(f"Residuals (sampled hold-out) · {explain_name}")
         fig2.tight_layout(); st.pyplot(fig2); plt.close(fig2)
 
         fig3, ax3 = plt.subplots()
@@ -690,13 +719,13 @@ with tab_perf:
         ax3.axhline(0, linestyle="--")
         ax3.set_xlabel("Predicted")
         ax3.set_ylabel("Residual")
-        ax3.set_title("Residuals vs Predicted (sampled hold-out)")
+        ax3.set_title(f"Residuals vs Predicted (sampled hold-out) · {explain_name}")
         fig3.tight_layout(); st.pyplot(fig3); plt.close(fig3)
 
 with tab_imp:
     try:
-        reg = pipe.named_steps["reg"]
-        pre = pipe.named_steps["pre"]
+        reg = pipe_vis.named_steps["reg"]
+        pre = pipe_vis.named_steps["pre"]
         trans_names = pre.get_feature_names_out().tolist()
         def _group_importances(trans_names, num_cols, cat_cols, importances):
             grouped = {}
@@ -719,7 +748,7 @@ with tab_imp:
         ax5.bar([k for k, _ in gitems], [v for _, v in gitems])
         ax5.set_xticklabels([k for k, _ in gitems], rotation=45, ha="right")
         ax5.set_ylabel("Grouped importance (sum)")
-        ax5.set_title("Model internal importances (top 20)")
+        ax5.set_title(f"Model internal importances (top 20) · {explain_name}")
         fig5.tight_layout(); st.pyplot(fig5); plt.close(fig5)
     except Exception as e:
         st.info(f"Importances not available: {e}")
@@ -745,7 +774,7 @@ with tab_beh:
             ax6.bar([k for k, _ in means], [v for _, v in means])
             ax6.set_xticklabels([k for k, _ in means], rotation=45, ha="right")
             ax6.set_ylabel("Mean predicted index")
-            ax6.set_title(f"{beh_choice}: mean predicted index by category")
+            ax6.set_title(f"{beh_choice}: mean predicted index by category · {explain_name}")
             fig6.tight_layout(); st.pyplot(fig6); plt.close(fig6)
             st.write("**Levels shown (top by frequency):**", ", ".join(levels))
 
@@ -757,9 +786,9 @@ with tab_pdp:
             pick = st.selectbox("Numeric feature", options=(num_cols[:3] if len(num_cols) >= 3 else num_cols))
             fig7, ax7 = plt.subplots()
             PartialDependenceDisplay.from_estimator(
-                pipe, X_te_s, features=[pick], kind="average", grid_resolution=PDP_GRID, ax=ax7
+                pipe_vis, X_te_s, features=[pick], kind="average", grid_resolution=PDP_GRID, ax=ax7
             )
-            ax7.set_title(f"PDP · {pick} (sampled)")
+            ax7.set_title(f"PDP · {pick} (sampled) · {explain_name}")
             fig7.tight_layout(); st.pyplot(fig7); plt.close(fig7)
         except Exception as e:
             st.info(f"PDP unavailable: {e}")
@@ -805,7 +834,7 @@ if ses_cols_ui:
     st.subheader("Socio-economic inputs")
     grid = st.columns(2)
     for i, c in enumerate(ses_cols_ui):
-        opts    = ses_options.get(c, ["Unknown"])
+        opts    = build_options_from_df(df, [c]).get(c, ["Unknown"])
         default = default_from_df(df, c)
         with grid[i % 2]:
             ses_vals[c] = st.selectbox(c, options=opts, index=(opts.index(default) if default in opts else 0))
@@ -815,7 +844,7 @@ with st.expander("Your current selections"):
 
 # ------------------------- PREDICT & EXPLAIN -----------------------
 if st.button("Predict + Explain"):
-    # Make one-row input for prediction
+    # Assemble one-row input
     X_row = {c: float(elham_core.get(c, num_medians.get(c, 0))) for c in num_cols}
     for c in beh_cols:
         X_row[c] = beh_vals.get(c, default_from_df(df, c))
@@ -823,10 +852,12 @@ if st.button("Predict + Explain"):
         X_row[c] = ses_vals.get(c, default_from_df(df, c))
 
     X_df = normalize_cats(pd.DataFrame([X_row]))
-    y_hat = float(pipe.predict(X_df)[0])
+
+    # Predict using picker (or blend)
+    y_hat = predict_with_choice(pipes, blend_weights, X_df, model_choice)
 
     st.success(f"Predicted Elham’s Index (including wisdom): **{y_hat:.2f}**")
-    tier = index_tier(y_hat, risk_bins)
+    tier = index_tier(y_hat, train_bins)  # tiers from TRAIN-only bins
     st.info(f"Risk tier based on predicted Elham Index: **{tier.title()}**")
 
     # ---------------------- WHAT-IF SIMULATOR ----------------------
@@ -848,7 +879,7 @@ if st.button("Predict + Explain"):
     for c in beh_cols:
         X_row_sim[c] = sim_beh[c]
     X_df_sim = normalize_cats(pd.DataFrame([X_row_sim]))
-    y_sim = float(pipe.predict(X_df_sim)[0])
+    y_sim = predict_with_choice(pipes, blend_weights, X_df_sim, model_choice)
     delta = y_sim - y_hat
     c1, c2 = st.columns(2)
     with c1: st.metric("Simulated Elham’s Index", f"{y_sim:.2f}", delta=f"{delta:+.2f}")
@@ -861,14 +892,15 @@ if st.button("Predict + Explain"):
     # ----------------- SHAP explanations (grouped) ----------------
     try:
         import shap
-        pre = pipe.named_steps["pre"]
+        pipe_for_explanations = pipes[explain_name]
+        pre = pipe_for_explanations.named_steps["pre"]
         X_trans = pre.transform(X_df)
-        explainer = shap.TreeExplainer(pipe.named_steps["reg"])
+        explainer = shap.TreeExplainer(pipe_for_explanations.named_steps["reg"])
         shap_vals = explainer.shap_values(X_trans)
 
         grouped = group_shap_by_original(feat_names, shap_vals, num_cols, all_cat_cols)
 
-        st.subheader("Top drivers of prediction (all features)")
+        st.subheader(f"Top drivers of prediction (all features) · {explain_name}")
         top_all = grouped[:14]
         plot_bar(top_all, "Top drivers of prediction")
 
@@ -891,153 +923,20 @@ if st.button("Predict + Explain"):
     for line in detailed_behavior_recommendations({c: beh_vals.get(c, "") for c in beh_cols}, tier):
         st.markdown(line)
 
-# -------------------- AI: SES ➜ Behaviour (pilot) -----------------
-def render_ai_ses_to_behaviour(df: pd.DataFrame, beh_cols: list[str], ses_cols_ui: list[str]) -> None:
-    """Pilot: learn how SES features relate to a selected behaviour category."""
-    if not ses_cols_ui:
-        st.info("No SES columns available to model behaviours.")
-        return
-    if not beh_cols:
-        st.info("No behaviour columns detected in the dataset.")
-        return
-
-    st.write("This pilot trains a simple classifier to predict one behaviour from SES only, "
-             "then shows which SES fields were most predictive.")
-
-    beh = st.selectbox("Behaviour to model from SES", beh_cols)
-
-    # Data
-    X = df[ses_cols_ui].astype(str).fillna("Unknown").copy()
-    y = df[beh].astype(str).fillna("Unknown").copy()
-
-    # Preprocess: OHE (version-safe) on SES
-    pre = ColumnTransformer(
-        transformers=[("cat", make_ohe(), ses_cols_ui)],
-        remainder="drop",
-        verbose_feature_names_out=True,
-    )
-
-    # Simple model
-    clf = RandomForestClassifier(n_estimators=400, random_state=42, n_jobs=-1)
-    pipe = Pipeline([("pre", pre), ("clf", clf)])
-
-    # Split: only stratify if safe
-    if _can_stratify(y):
-        X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.25, random_state=42, stratify=y)
-    else:
-        X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.25, random_state=42)
-
-    pipe.fit(X_tr, y_tr)
-    y_pred = pipe.predict(X_te)
-    acc = float(accuracy_score(y_te, y_pred))
-    f1  = float(f1_score(y_te, y_pred, average="macro"))
-
-    st.markdown(f"**Hold-out accuracy:** {acc:.3f} · **Macro-F1:** {f1:.3f}")
-
-    # Grouped importances (sum one-hot back to SES columns)
-    pre_fit = pipe.named_steps["pre"]
-    names   = pre_fit.get_feature_names_out().tolist()
-    importances = pipe.named_steps["clf"].feature_importances_
-    gitems = _group_cat_importances(names, ses_cols_ui, importances)[:10]
-
-    # Plot
-    fig, ax = plt.subplots()
-    ax.bar([k for k, _ in gitems], [v for _, v in gitems])
-    ax.set_xticklabels([k for k, _ in gitems], rotation=45, ha="right")
-    ax.set_ylabel("Grouped importance (sum)")
-    ax.set_title(f"SES drivers of '{beh}' (pilot)")
-    fig.tight_layout()
-    st.pyplot(fig)
-
-    # Show the top SES column’s level distribution vs behaviour
-    if gitems:
-        top_ses = gitems[0][0]
-        st.caption(f"Most predictive SES field: **{top_ses}** — distribution of {beh} by {top_ses}")
-        ct = (pd.crosstab(df[top_ses].astype(str), df[beh].astype(str), normalize="index")
-                .fillna(0.0)
-                .sort_index())
-        ct = ct[sorted(ct.columns)]
-        st.dataframe(ct.style.format("{:.2f}"))
-
-with st.expander("AI: SES ➜ Behaviour influence (pilot)"):
-    render_ai_ses_to_behaviour(df, beh_cols, ses_cols_ui)
-
-# ----------------------- Fairness quick audit -----------------------
-# ----------------------- Fairness quick audit -----------------------
+# ----------------------- Fairness quick audit ----------------------
 with st.expander("Fairness check by SES (hold-out)"):
     if ses_cols_ui:
         try:
-            # re-make a hold-out split independent of training
-            X_all = df[num_cols + all_cat_cols].copy()
-            y_all = df[TARGET_COL].astype(float).values
-            X_tr_a, X_te_a, y_tr_a, y_te_a = train_test_split(
-                X_all, y_all, test_size=0.2, random_state=42
-            )
-            yhat_a = pipe.predict(X_te_a)
-
-            te = X_te_a.copy()
-            te["_y"] = y_te_a
-            te["_yhat"] = yhat_a
-            te["_ae"] = np.abs(te["_y"] - te["_yhat"])
-
-            overall_mae = float(te["_ae"].mean())
-            st.caption(f"Overall hold-out MAE: **{overall_mae:.3f}**")
-
-            min_n = st.slider("Minimum rows per group (collapse rare)", 3, 30, 8, step=1)
-
-            def render_group_table(col: str):
-                tmp = te.copy()
-                tmp["_grp"] = tmp[col].astype(str).fillna("Unknown")
-                counts = tmp["_grp"].value_counts()
-                rare = counts[counts < min_n].index
-                if len(rare) > 0:
-                    tmp.loc[tmp["_grp"].isin(rare), "_grp"] = f"Other (<{min_n})"
-
-                agg = tmp.groupby("_grp").agg(
-                    n=("_ae", "size"),
-                    MAE=("_ae", "mean"),
-                    sd=("_ae", "std"),
-                ).fillna(0.0)
-
-                # share, standard error, 95% CI, delta vs overall
-                total = float(agg["n"].sum())
-                agg["share"] = agg["n"] / total
-                agg["se"] = agg["sd"] / np.sqrt(np.maximum(agg["n"], 1))
-                agg["ci_low"] = agg["MAE"] - 1.96 * agg["se"]
-                agg["ci_high"] = agg["MAE"] + 1.96 * agg["se"]
-                agg["Δ vs overall"] = agg["MAE"] - overall_mae
-
-                # nice ordering: biggest groups first, then MAE
-                agg = agg.sort_values(["n", "MAE"], ascending=[False, True])
-                cols_to_show = ["n", "share", "MAE", "Δ vs overall", "ci_low", "ci_high"]
-                st.markdown(f"**MAE by {col}**")
-                st.dataframe(
-                    agg[cols_to_show].style.format({
-                        "share": "{:.1%}",
-                        "MAE": "{:.3f}",
-                        "Δ vs overall": "{:+.3f}",
-                        "ci_low": "{:.3f}",
-                        "ci_high": "{:.3f}",
-                    })
-                )
-
-                # quick bar plot with overall reference line
-                fig, ax = plt.subplots(figsize=(6, max(2, 0.35*len(agg))))
-                ax.barh(agg.index, agg["MAE"])
-                ax.axvline(overall_mae, linestyle="--", label="overall MAE")
-                ax.invert_yaxis()
-                ax.set_xlabel("MAE")
-                ax.set_title(f"{col} — group MAE (n≥{min_n}; rare→Other)")
-                ax.legend()
-                fig.tight_layout()
-                st.pyplot(fig)
-                plt.close(fig)
-
+            X_all_eval = df[num_cols + all_cat_cols].copy()
+            y_all_eval = df[TARGET_COL].astype(float).values
+            X_tr_a, X_te_a, y_tr_a, y_te_a = train_test_split(X_all_eval, y_all_eval, test_size=0.2, random_state=42)
+            yhat_a = pipes[best_name].predict(X_te_a)  # evaluate best single model
+            te = X_te_a.copy(); te["_y"] = y_te_a; te["_yhat"] = yhat_a
             for c in ses_cols_ui:
-                render_group_table(c)
-
+                mae = te.groupby(te[c].astype(str)).apply(lambda g: float(np.mean(np.abs(g["_y"]-g["_yhat"])))).rename("MAE")
+                st.markdown(f"**MAE by {c}**")
+                st.dataframe(mae.sort_values().to_frame())
         except Exception as e:
             st.caption(f"Subgroup MAE not available: {e}")
     else:
         st.caption("No SES columns detected.")
-
