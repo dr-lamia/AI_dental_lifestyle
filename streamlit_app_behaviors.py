@@ -897,6 +897,38 @@ with tab_imp:
         fig5.tight_layout(); st.pyplot(fig5); plt.close(fig5)
     except Exception as e:
         st.info(f"Importances not available: {e}")
+# --- Add this right after you compute gitems / before leaving tab_imp ---
+
+st.markdown("### 🔎 Behaviour-only & SES-only importance")
+normalize_subset = st.toggle("Normalize within subset (makes bars sum to 1)", value=True)
+
+# Compute full grouped importances once
+grouped_all = _group_importances(trans_names, num_cols, all_cat_cols, importances)
+grouped_dict = dict(grouped_all)
+
+def _subset_items(keys, label, topn=20):
+    items = [(k, grouped_dict.get(k, 0.0)) for k in keys if k in grouped_dict]
+    items = sorted(items, key=lambda kv: kv[1], reverse=True)[:topn]
+    if normalize_subset and items:
+        s = sum(v for _, v in items) or 1e-12
+        items = [(k, v / s) for k, v in items]
+    if not items:
+        st.info(f"No {label} features found in this model.")
+        return
+    fig, ax = plt.subplots()
+    ax.bar([k for k, _ in items], [v for _, v in items])
+    ax.set_xticklabels([k for k, _ in items], rotation=45, ha="right")
+    ax.set_ylabel("Importance" + (" (normalized)" if normalize_subset else ""))
+    ax.set_title(f"{label} importance (top {len(items)})")
+    fig.tight_layout()
+    st.pyplot(fig)
+    plt.close(fig)
+
+# Behaviour-only (your BEHAVIOR_COLS present in df)
+_subset_items(beh_cols, "Behaviour")
+
+# SES-only (your SES fields shown in UI; school is already excluded from final insights)
+_subset_items(ses_cols_ui, "SES (excluding school)")
 
 with tab_beh:
     st.caption("Pick a behaviour to see mean predicted index by category (on sampled hold-out).")
