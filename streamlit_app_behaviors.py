@@ -25,7 +25,7 @@ except Exception:
     XGB_OK = False
 
 # ============================ CONFIG =============================
-st.set_page_config(page_title="Dental AI Coach · Behaviours + SES", page_icon="🦷", layout="wide")
+st.set_page_config(page_title="AI tool for personalized awareness and education", page_icon="🦷", layout="wide")
 
 DATA_PATH = "data/no_recommendation_dental_dataset_cleaned_keep_including_wisdom.csv"
 TARGET_COL = "elham_s_index_including_wisdom"
