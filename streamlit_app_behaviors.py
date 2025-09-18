@@ -747,7 +747,7 @@ def default_from_df(df: pd.DataFrame, col: str) -> str:
 
 
 # =============================== UI ===============================
-st.title("🦷 Dental AI Coach: Behaviours → Explainable Index + Advice")
+st.title("🦷 AI tool for personalized awareness and education")
 
 if not XGB_OK:
     st.caption("ℹ️ XGBoost not installed — using RandomForest only. To enable blend, `pip install xgboost`.")
