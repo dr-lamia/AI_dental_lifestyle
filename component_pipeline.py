@@ -47,38 +47,38 @@ DESCRIPTIVE_COMPONENTS = {
     "veneer_f": "Veneers",
 }
 
-# Five-fold out-of-fold metrics regenerated after systematic category cleaning
-# of the identical audited 160-participant cohort (2026-09-01). The cleaned
-# dataset corrects duplicated spelling/case categories and spreadsheet artifacts
-# while leaving all clinical Elham component counts unchanged.
+# Five-fold out-of-fold metrics from GitHub Actions after systematic cleaning of
+# the identical audited 160-participant cohort (2026-09-01, run 33521412139).
+# Cleaning standardizes duplicated questionnaire categories and spreadsheet
+# artifacts while leaving all clinical Elham component counts unchanged.
 VALIDATED_METRICS = {
     "missing_0_including_wisdom_": {
         "Mean baseline": {"R2": 0.0, "MAE": 1.33546875, "RMSE": 1.8358304490066617},
         "Median baseline": {"R2": -0.09597932289433109, "MAE": 1.09375, "RMSE": 1.921913109378257},
-        "Random Forest": {"R2": 0.02804750524136801, "MAE": 1.3170948292448295, "RMSE": 1.809902117683958},
-        "XGBoost": {"R2": 0.026111959214455194, "MAE": 1.3640688482671977, "RMSE": 1.8117033407703476},
-        "Blend": {"R2": 0.04476858369589298, "MAE": 1.3264606276352802, "RMSE": 1.7942661644904407},
+        "Random Forest": {"R2": 0.036329329921567566, "MAE": 1.3040266359026775, "RMSE": 1.8021747034799838},
+        "XGBoost": {"R2": 0.05184351467610915, "MAE": 1.3205259639769793, "RMSE": 1.787609190253974},
+        "Blend": {"R2": 0.06118322974174828, "MAE": 1.2988572657284199, "RMSE": 1.7787830737560233},
     },
     "decayed_1": {
         "Mean baseline": {"R2": 0.0, "MAE": 3.395625, "RMSE": 4.426906369012112},
         "Median baseline": {"R2": -0.05625717566016086, "MAE": 3.375, "RMSE": 4.54972526643093},
-        "Random Forest": {"R2": 0.05695679256603747, "MAE": 3.2846797784391533, "RMSE": 4.298987003665757},
-        "XGBoost": {"R2": -0.04912200053650162, "MAE": 3.4879736229777336, "RMSE": 4.534332189585815},
-        "Blend": {"R2": 0.02073762864860529, "MAE": 3.3601774341196275, "RMSE": 4.380764125419098},
+        "Random Forest": {"R2": 0.05830601977099037, "MAE": 3.2808503873055956, "RMSE": 4.295910587702916},
+        "XGBoost": {"R2": -0.04358688746865136, "MAE": 3.453042853809893, "RMSE": 4.522354920521707},
+        "Blend": {"R2": 0.025853933198487722, "MAE": 3.339953250579721, "RMSE": 4.369305155759052},
     },
     "filled_2": {
         "Mean baseline": {"R2": 0.0, "MAE": 1.3914062500000002, "RMSE": 1.8969959804912608},
         "Median baseline": {"R2": -0.2991185793061526, "MAE": 1.0375, "RMSE": 2.1621748310439655},
-        "Random Forest": {"R2": 0.028065461017322324, "MAE": 1.2738447310405643, "RMSE": 1.8701865033713068},
-        "XGBoost": {"R2": -0.1166264526427736, "MAE": 1.379118508414831, "RMSE": 2.0045660312309383},
-        "Blend": {"R2": -0.02110543469342141, "MAE": 1.3231438728608171, "RMSE": 1.9169099184309053},
+        "Random Forest": {"R2": 0.030321433180376167, "MAE": 1.2751012235449735, "RMSE": 1.8680147831497629},
+        "XGBoost": {"R2": -0.16419698292354257, "MAE": 1.3755484018474817, "RMSE": 2.046819969249254},
+        "Blend": {"R2": -0.03445512557809183, "MAE": 1.3223286079027745, "RMSE": 1.92939984180594},
     },
     "hypocalcification_4": {
         "Mean baseline": {"R2": 0.0, "MAE": 5.44375, "RMSE": 6.8032620852058905},
         "Median baseline": {"R2": -0.14887583552764827, "MAE": 5.0875, "RMSE": 7.292119033586876},
-        "Random Forest": {"R2": -0.05314329862952594, "MAE": 5.493272094764803, "RMSE": 6.981696023353205},
-        "XGBoost": {"R2": -0.16216046582654542, "MAE": 5.824771767109633, "RMSE": 7.334157811943408},
-        "Blend": {"R2": -0.08451378015747202, "MAE": 5.6171158873796605, "RMSE": 7.084916548095396},
+        "Random Forest": {"R2": -0.044363768012874116, "MAE": 5.467076773689274, "RMSE": 6.952533658683061},
+        "XGBoost": {"R2": -0.18993894976498216, "MAE": 5.890742816403508, "RMSE": 7.4212923792307635},
+        "Blend": {"R2": -0.09301778278735928, "MAE": 5.62435298624023, "RMSE": 7.112639801100481},
     },
 }
 
@@ -194,9 +194,8 @@ def fit_all_components(df: pd.DataFrame) -> Dict[str, ComponentResult]:
 def fit_component_for_app(df: pd.DataFrame, target: str) -> ComponentResult:
     """Fit only final models for interactive deployment.
 
-    Validation metrics come from the cleaned-cohort five-fold run. This avoids
-    repeating full cross-validation on every Streamlit cold start while retaining
-    transparent validation values in the deployed research prototype.
+    Validation metrics come from the cleaned-cohort five-fold GitHub Actions run.
+    This avoids repeating full cross-validation on every Streamlit cold start.
     """
     if target not in MODELED_COMPONENTS:
         raise ValueError(f"Component is not configured for modeling: {target}")
