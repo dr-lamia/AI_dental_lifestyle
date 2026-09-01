@@ -5,6 +5,7 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Retry triggered after account/billing update on 2026-09-01.
 jobs:
   validate:
     runs-on: ubuntu-latest
