@@ -4,7 +4,7 @@ import streamlit as st
 import matplotlib.pyplot as plt
 
 from analysis_pipeline import canonicalize, analysis_data
-from component_pipeline import MODELED_COMPONENTS, fit_all_components, clinical_profile
+from component_pipeline import MODELED_COMPONENTS, fit_all_components_for_app, clinical_profile
 from data.master160_embedded import load_master160
 
 st.set_page_config(page_title="Dental AI Coach – Audited Research Prototype", layout="wide")
@@ -15,9 +15,9 @@ st.caption("Detailed Elham oral-health profile, component-specific AI analysis, 
 def load_data():
     return canonicalize(load_master160())
 
-@st.cache_resource(show_spinner="Validating component-specific models on the audited cohort...")
+@st.cache_resource(show_spinner="Loading validated component-specific models...")
 def train(signature, data):
-    return fit_all_components(data)
+    return fit_all_components_for_app(data)
 
 
 def safe_num(v):
@@ -160,7 +160,6 @@ def action_plan(row):
         modifiable_factors.append("Microbial/salivary profile: " + ", ".join(microbial_flags))
         recommendations.append("Intensify plaque control and reduce fermentable-carbohydrate frequency; any adjunctive measure requires clinician judgment.")
 
-    # Deduplicate while preserving order.
     recommendations = list(dict.fromkeys(recommendations))
     if not recommendations:
         recommendations.append("Maintain routine risk-based prevention and recall, modified according to the direct clinical examination.")
