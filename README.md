@@ -1,47 +1,57 @@
 # Dental AI Coach / Elham's Index – Q1 revision
 
-This branch contains the leakage-safe research implementation for the Dental AI Coach project.
+This branch contains the scientifically revised implementation for the Dental AI Coach project.
 
-## Why this branch exists
-The earlier Streamlit implementation allowed tooth-level clinical variables that mathematically compose Elham's Index to enter the machine-learning predictor matrix. Those results measure partial reconstruction of the index and must not be interpreted as independent predictive validity.
+## Revised study concept
+Elham's Index is no longer treated primarily as one machine-learning target. Its individual clinical components are retained as a detailed oral-health profile. The AI layer evaluates sufficiently prevalent components separately using independently collected demographic, socioeconomic, behavioral, dietary and salivary predictors.
 
-The revised workflow separates:
+The intended workflow is:
 
-1. **Outcome calculation and quality control** – direct Elham component counts are used to verify the stored outcome.
-2. **Machine-learning estimation** – only independently collected demographic, socioeconomic, behavioral, dietary and salivary variables are predictors.
-3. **Rule-based clinical support** – tooth-level findings are used here, not as ML predictors.
+**Detailed Elham clinical profile + independent patient factors → component-specific explainable AI → patient-specific risk profile → personalized preventive and clinical action plan.**
+
+This is a cross-sectional decision-support study. It can evaluate associations and internal component-specific prediction/risk stratification, but it cannot yet claim causal effects or future oral-health forecasting. Genuine forecasting requires longitudinal follow-up with repeat clinical assessment.
+
+## Why the older near-perfect results are not used
+The earlier Streamlit implementation allowed tooth-level clinical variables that mathematically compose Elham's Index to enter the predictor matrix. Those results measure partial reconstruction of the index and must not be interpreted as independent predictive validity.
+
+## Raw-data audit
+The uploaded raw workbooks identify:
+
+- 205 participants with socioeconomic, behavioral, dietary, other-factor and salivary data;
+- 160 participants with original tooth-level clinical assessment;
+- 160 matched participants for the intended primary analysis;
+- 45 non-clinical records without a corresponding raw clinical assessment;
+- all 160 raw clinical records pass the documented Elham component-sum arithmetic check.
+
+The repository's older processed CSV remains only a temporary branch default. It should not be treated as the definitive manuscript dataset. The audited 160-case reconstruction should be used for final manuscript analysis and production deployment.
+
+## Component-specific modeling
+The current cohort supports separate exploratory/internal models for the components with adequate prevalence, principally:
+
+- missing teeth including wisdom teeth;
+- decayed teeth;
+- filled teeth;
+- hypocalcified teeth.
+
+Rare findings such as fluorosis, erosion, abrasion, attrition, abfraction, sealants, fractures, pontics, implant crowns and veneers remain part of the detailed clinical profile but should not receive separate ML models when event counts are too small.
+
+## Current component-model findings
+The leakage-safe analyses show only modest predictive signal from the independent non-clinical variables. In the audited analysis, Random Forest explained approximately 13% of the variation in filled teeth, 8% in missing teeth and 7.5% in decayed teeth, while hypocalcification was not meaningfully predicted. These results support risk profiling and explanation rather than replacement of the clinical examination.
 
 ## Primary files
-- `analysis_pipeline.py` – outcome audit, leakage-safe predictors, five-fold out-of-fold validation, baselines and fairness screening.
-- `streamlit_app_q1.py` – revised research interface with Data QC, study design, performance, XAI, scenario, fairness and rule-based care modules.
-- `METHODOLOGY_Q1.md` – manuscript-ready methods specification.
+- `analysis_pipeline.py` – leakage-safe preprocessing, five-fold validation, baselines and fairness screening.
+- `component_pipeline.py` – component-specific Elham modeling.
+- `streamlit_app_component.py` – redesigned dashboard with detailed oral-health profile, component-specific AI, patient-level explanations and personalized action plan.
+- `streamlit_app_q1.py` – previous total-score research interface retained for comparison only.
+- `METHODOLOGY_Q1.md` – methods specification; should be updated to the component-specific manuscript framing before submission.
 - `data/DATA_DICTIONARY_Q1.md` – predictor/outcome/clinical-rule variable roles.
 - `scripts/prepare_dataset.py` – derived-dataset/QC utility; the source file is not overwritten.
-- `.github/workflows/q1-validation.yml` – reproducible validation job when GitHub Actions is available for the repository.
 
-## Dataset used by the revised app
-The Q1 app intentionally reads the richer root-level file:
+## Clinical recommendation layer
+The recommendation engine combines direct clinical findings with modifiable patient factors to generate a clinician-reviewable personalized oral-health action plan. It is not an autonomous prescription system. Diagnosis, treatment selection, medication/therapeutic dosing and definitive recall intervals remain the responsibility of the treating clinician and applicable guidance.
 
-`no_recommendation_dental_dataset_cleaned_keep_including_wisdom.csv`
+## Next research phase
+A longitudinal follow-up study should repeat the detailed Elham assessment after a prespecified interval, such as 12 months. Baseline clinical profile, lifestyle, diet, socioeconomic and salivary factors could then be tested as predictors of change in individual oral-health components, allowing genuine future-risk forecasting.
 
-The older `data/` CSV is a reduced deployment copy and should not be treated as the definitive modeling source.
-
-## Outcome-QC rule
-A record is eligible for supervised validation only when the stored `elham_s_index_including_wisdom` is present, all documented direct component counts are present, and the stored index equals their sum. Failed records are preserved and reported; they are not silently repaired.
-
-## Validation
-- shuffled five-fold cross-validation, random seed 42;
-- pooled out-of-fold R², MAE and RMSE;
-- mean and median outcome baselines;
-- Random Forest, XGBoost and an equal-weight blend when XGBoost is available;
-- final full-cohort refitting is for prototype deployment only and is not reported as validation performance.
-
-## Interpretability and safeguards
-Grouped SHAP is descriptive of model behavior and is explicitly non-causal. The what-if simulator is associational, not an intervention-effect estimator. Fairness screening uses out-of-fold predictions and a prespecified subgroup-MAE flag. The rule-based care layer is clinician-editable decision support and does not replace examination, diagnosis, professional judgment or local guidelines.
-
-## Current data-status warning
-Accessible GitHub/Drive copies do not currently document a complete 500-participant modeling cohort with valid Elham outcomes. The manuscript sample-flow statement must therefore be reconciled with the original study source before final submission. Do not merge this branch or replace the production Streamlit app until the final source cohort and audited metrics are confirmed.
-
-A local audit of the accessible Drive/GitHub-aligned copies identified 205 participant IDs, of which 159 records satisfied the documented Elham arithmetic; 46 failed the arithmetic check. In an exploratory five-fold analysis of those 159 records using the current primary independent predictor set, Random Forest produced approximately R²=0.044, MAE=6.96 and RMSE=8.77; XGBoost approximately R²=-0.100, MAE=7.39 and RMSE=9.41; and the equal-weight blend approximately R²=-0.007, MAE=7.12 and RMSE=9.00. These are working audit results, not final manuscript values, because the intended complete study cohort has not yet been reconciled.
-
-The GitHub Actions validation workflow has been added, but the repository's current Actions run failed at startup before any job executed. Therefore the branch should be validated locally or after repository Actions settings/availability are resolved before merge.
+## Deployment status
+This branch remains a research revision and has not replaced the production Streamlit app. Do not merge or deploy as the final clinical/research version until the audited 160-case dataset is used directly and the component-specific analyses are rerun reproducibly on that exact source.
