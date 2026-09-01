@@ -1,39 +1,43 @@
-# Dental AI Coach
+# Dental AI Coach / Elham's Index – Q1 revision
 
-Research prototype for explainable prediction of Elham's Index and rule-based personalized oral-health decision support.
+This branch contains the leakage-safe research implementation for the Dental AI Coach project.
 
-## Q1 methodology revision
-The `q1-methodology-revision` branch separates **prediction** from **clinical rule generation** and prevents target leakage.
+## Why this branch exists
+The earlier Streamlit implementation allowed tooth-level clinical variables that mathematically compose Elham's Index to enter the machine-learning predictor matrix. Those results measure partial reconstruction of the index and must not be interpreted as independent predictive validity.
 
-The original application allowed numeric clinical component counts (for example decay, fillings, missing teeth, enamel defects, tooth wear, fractures, DMF, sound teeth, and treatment index) to enter the model while predicting `elham_s_index_including_wisdom`. Because these variables directly compose or derive from the target, the resulting very high R² values cannot be used as unbiased evidence of predictive validity.
+The revised workflow separates:
 
-The revised workflow:
-- excludes all target-derived clinical counts from machine-learning inputs;
-- uses demographic, behavioral, salivary, socioeconomic, and periodontal-status predictors only when present in the dataset;
-- excludes participant ID, school, place of birth, and nationality from the predictive model;
-- performs preprocessing inside validation folds;
-- reports pooled out-of-fold performance from shuffled 5-fold cross-validation;
-- calculates fairness metrics from out-of-fold predictions;
-- applies grouped SHAP for model interpretation with explicit non-causal wording;
-- retains tooth-level clinical counts only for arithmetic audit and the clinician-editable rule-based care layer;
-- labels the Streamlit application as a research decision-support prototype.
+1. **Outcome calculation and quality control** – direct Elham component counts are used to verify the stored outcome.
+2. **Machine-learning estimation** – only independently collected demographic, socioeconomic, behavioral, dietary and salivary variables are predictors.
+3. **Rule-based clinical support** – tooth-level findings are used here, not as ML predictors.
 
-## Main files
-- `analysis_pipeline.py` — leakage-safe preprocessing, cross-validation, RF/XGBoost/Blend, final refit, and fairness screening.
-- `streamlit_app_q1.py` — revised Streamlit research interface.
-- `scripts/prepare_dataset.py` — creates a cleaned analysis copy and dataset-QC report without overwriting the raw file.
-- `METHODOLOGY_Q1.md` — manuscript-ready revised methods.
-- `data/DATA_DICTIONARY_Q1.md` — predictor/target/exclusion roles.
+## Primary files
+- `analysis_pipeline.py` – outcome audit, leakage-safe predictors, five-fold out-of-fold validation, baselines and fairness screening.
+- `streamlit_app_q1.py` – revised research interface with Data QC, study design, performance, XAI, scenario, fairness and rule-based care modules.
+- `METHODOLOGY_Q1.md` – manuscript-ready methods specification.
+- `data/DATA_DICTIONARY_Q1.md` – predictor/outcome/clinical-rule variable roles.
+- `scripts/prepare_dataset.py` – derived-dataset/QC utility; the source file is not overwritten.
+- `.github/workflows/q1-validation.yml` – reproducible validation job when GitHub Actions is available for the repository.
 
-## Run locally
-```bash
-pip install -r requirements.txt
-python scripts/prepare_dataset.py
-streamlit run streamlit_app_q1.py
-```
+## Dataset used by the revised app
+The Q1 app intentionally reads the richer root-level file:
 
-## Important reporting note
-Do **not** carry forward the earlier R²/MAE values into the revised manuscript. Re-run the leakage-safe pipeline and report the new out-of-fold metrics. The Orange workflow should also be rerun after removing the same target-derived variables before any Orange-versus-Python comparison is reported.
+`no_recommendation_dental_dataset_cleaned_keep_including_wisdom.csv`
 
-## Clinical disclaimer
-This software is a research prototype. Model outputs, SHAP explanations, what-if simulations, risk tiers, and rule-based suggestions do not replace clinical examination, diagnosis, professional judgment, local clinical guidelines, or regulatory requirements.
+The older `data/` CSV is a reduced deployment copy and should not be treated as the definitive modeling source.
+
+## Outcome-QC rule
+A record is eligible for supervised validation only when the stored `elham_s_index_including_wisdom` is present, all documented direct component counts are present, and the stored index equals their sum. Failed records are preserved and reported; they are not silently repaired.
+
+## Validation
+- shuffled five-fold cross-validation, random seed 42;
+- pooled out-of-fold R², MAE and RMSE;
+- mean and median outcome baselines;
+- Random Forest, XGBoost and an equal-weight blend when XGBoost is available;
+- final full-cohort refitting is for prototype deployment only and is not reported as validation performance.
+
+## Interpretability and safeguards
+Grouped SHAP is descriptive of model behavior and is explicitly non-causal. The what-if simulator is associational, not an intervention-effect estimator. Fairness screening uses out-of-fold predictions and a prespecified subgroup-MAE flag. The rule-based care layer is clinician-editable decision support and does not replace examination, diagnosis, professional judgment or local guidelines.
+
+## Current data-status warning
+Accessible GitHub/Drive copies do not currently document a complete 500-participant modeling cohort with valid Elham outcomes. The manuscript sample-flow statement must therefore be reconciled with the original study source before final submission. Do not merge this branch or replace the production Streamlit app until the final source cohort and audited metrics are confirmed.
