@@ -27,47 +27,31 @@ jobs:
           import json
           import pandas as pd
           from pathlib import Path
-          from analysis_pipeline import fit_validate, fairness_table, canonicalize, TARGET, TARGET_COMPONENTS
+          from analysis_pipeline import fit_validate, fairness_table, canonicalize
 
-          data_path = Path('data/no_recommendation_dental_dataset_cleaned_keep_including_wisdom.csv')
-          df_raw = pd.read_csv(data_path)
-          df = canonicalize(df_raw)
+          data_path = Path('no_recommendation_dental_dataset_cleaned_keep_including_wisdom.csv')
+          df = canonicalize(pd.read_csv(data_path))
           res = fit_validate(df)
           out = Path('results/q1_validation')
           out.mkdir(parents=True, exist_ok=True)
 
+          payload = {
+              'n_source_rows': res.n_source,
+              'n_qc_eligible': res.n_eligible,
+              'n_excluded_by_outcome_qc': res.n_source - res.n_eligible,
+              'n_predictors': len(res.predictors),
+              'predictors': res.predictors,
+              'risk_bins_q34_q67': [float(x) for x in res.risk_bins],
+              'metrics': res.metrics,
+          }
           with open(out/'metrics.json', 'w', encoding='utf-8') as f:
-              json.dump({
-                  'n_total_rows': int(len(df_raw)),
-                  'n_modeled': int(df[TARGET].notna().sum()),
-                  'n_predictors': int(len(res.predictors)),
-                  'predictors': res.predictors,
-                  'risk_bins_q34_q67': [float(x) for x in res.risk_bins],
-                  'metrics': res.metrics,
-              }, f, indent=2)
+              json.dump(payload, f, indent=2)
 
           res.oof.to_csv(out/'oof_predictions.csv', index=False)
+          res.audit.to_csv(out/'target_arithmetic_qc.csv', index=False)
           pred_col = 'blend' if 'blend' in res.oof.columns else 'rf'
           fairness_table(df, res.oof, pred_col=pred_col).to_csv(out/'fairness_screen.csv', index=False)
-
-          present_components = [c for c in TARGET_COMPONENTS if c in df.columns]
-          component_sum = df[present_components].sum(axis=1, min_count=1)
-          qc = pd.DataFrame({
-              'id': df['id'] if 'id' in df.columns else range(len(df)),
-              'reported_elham_index': pd.to_numeric(df[TARGET], errors='coerce'),
-              'sum_of_all_listed_target_derived_fields': component_sum,
-          })
-          qc['difference'] = qc['reported_elham_index'] - qc['sum_of_all_listed_target_derived_fields']
-          qc.to_csv(out/'target_arithmetic_qc.csv', index=False)
-
-          summary = {
-              'rows_with_exact_equality_to_all_listed_target_derived_field_sum': int((qc['difference'].abs() < 1e-9).sum()),
-              'rows_with_nonzero_difference': int((qc['difference'].abs() >= 1e-9).sum()),
-              'note': 'The listed target-derived fields include downstream variables such as DMF and treatment index; this QC is diagnostic only and is not used to redefine the target.'
-          }
-          with open(out/'qc_summary.json', 'w', encoding='utf-8') as f:
-              json.dump(summary, f, indent=2)
-          print(json.dumps({'metrics':res.metrics, 'n_predictors':len(res.predictors), 'risk_bins':res.risk_bins}, indent=2))
+          print(json.dumps(payload, indent=2))
           PY
       - name: Upload validation outputs
         uses: actions/upload-artifact@v4
