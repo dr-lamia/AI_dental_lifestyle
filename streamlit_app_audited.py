@@ -207,34 +207,92 @@ def action_plan(row, prioritized_fields=None):
     return clinical_priorities, modifiable_factors, recommendations
 
 
-def _choice_key(value, col):
-    """Normalize equivalent categorical labels for the UI without changing training data."""
+def _base_choice_text(value):
+    """Normalize superficial spelling/case/punctuation differences for every dropdown."""
     s = safe_text(value)
+    s = s.replace("’", "'").replace("–", "-").replace("—", "-")
     s = re.sub(r"\s+", " ", s).strip().lower()
-    if not s or s in {"nan", "none", "n/a", "na", "unknown", "-"}:
+    s = re.sub(r"\s*[/_-]\s*", " ", s)
+    s = re.sub(r"[^a-z0-9%+.' ]+", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _choice_key(value, col):
+    """Collapse equivalent questionnaire categories while preserving a raw model value."""
+    s = _base_choice_text(value)
+    if not s or s in {"nan", "none", "n a", "na", "unknown", "unk", "not known", "-"}:
         return "unknown"
 
-    # Field-specific aliases found in the source questionnaire.
+    # Universal yes/no variants.
+    if s in {"yes", "y", "yeah", "true", "1"}:
+        return "yes"
+    if s in {"no", "n", "false", "0"}:
+        return "no"
+
+    # Common frequency wording used across brushing, diet, drinks and snacks.
+    frequency_aliases = {
+        "once daily": "once daily", "once a day": "once daily", "1 time daily": "once daily",
+        "1 time a day": "once daily", "one time daily": "once daily", "daily once": "once daily",
+        "twice daily": "twice daily", "twice a day": "twice daily", "2 times daily": "twice daily",
+        "2 times a day": "twice daily", "two times daily": "twice daily", "daily twice": "twice daily",
+        "three times daily": "three times daily", "3 times daily": "three times daily",
+        "3 times a day": "three times daily", "three times a day": "three times daily",
+        "every day": "daily", "everyday": "daily", "daily": "daily",
+        "never": "never", "not at all": "never",
+        "occasionally": "occasionally", "occasional": "occasionally", "sometimes": "sometimes",
+        "frequently": "frequent", "frequent": "frequent", "often": "often",
+    }
+    if s in frequency_aliases:
+        return frequency_aliases[s]
+
+    # Categories that recur in several socioeconomic fields.
+    universal_aliases = {
+        "own": "owned", "owned": "owned", "owner": "owned",
+        "rent": "rented", "rented": "rented", "rental": "rented",
+        "post graduate": "postgraduate level", "post graduate level": "postgraduate level",
+        "postgraduate": "postgraduate level", "postgraduate level": "postgraduate level",
+        "university": "university level", "university education": "university level",
+        "university level": "university level", "college": "university level",
+        "school": "school level", "school education": "school level", "school level": "school level",
+        "male": "male", "m": "male", "female": "female", "f": "female",
+        "dont know": "unknown", "don't know": "unknown", "do not know": "unknown",
+        "not applicable": "not applicable", "n a applicable": "not applicable",
+    }
+    if s in universal_aliases:
+        return universal_aliases[s]
+
+    # Field-specific semantic aliases. These are deliberately conservative: only
+    # clearly equivalent source responses are merged.
     aliases = {
         "house_owned_or_rent": {
-            "owned": "owned", "own": "owned",
-            "rented": "rented", "rent": "rented",
+            "family owned": "owned", "owned house": "owned", "rented house": "rented",
         },
         "father_s_education": {
-            "post graduate level": "postgraduate level",
-            "postgraduate level": "postgraduate level",
-            "school": "school level",
-            "school level": "school level",
-            "university": "university level",
-            "university level": "university level",
+            "primary school": "school level", "secondary school": "school level",
+            "high school": "school level",
         },
         "mother_s_education": {
-            "post graduate level": "postgraduate level",
-            "postgraduate level": "postgraduate level",
-            "school": "school level",
-            "school level": "school level",
-            "university": "university level",
-            "university level": "university level",
+            "primary school": "school level", "secondary school": "school level",
+            "high school": "school level",
+        },
+        "tooth_brushing_frequency": {
+            "one time": "once daily", "once": "once daily", "two times": "twice daily",
+            "twice": "twice daily", "three times": "three times daily",
+        },
+        "frequency_of_visits": {
+            "when needed": "when needed", "only when needed": "when needed",
+            "when i have pain": "when symptomatic", "when pain": "when symptomatic",
+        },
+        "smoking": {
+            "non smoker": "no", "nonsmoker": "no", "non smoking": "no",
+            "smoker": "yes", "smoking": "yes",
+        },
+        "interdental_cleaning": {
+            "not using": "no", "none": "no",
+        },
+        "mouth_rinse": {
+            "not using": "no", "none": "no",
         },
     }
     return aliases.get(col, {}).get(s, s)
@@ -248,19 +306,25 @@ def _choice_display(key):
         "postgraduate level": "Postgraduate level",
         "school level": "School level",
         "university level": "University level",
+        "once daily": "Once daily",
+        "twice daily": "Twice daily",
+        "three times daily": "Three times daily",
+        "not applicable": "Not applicable",
+        "when symptomatic": "When symptomatic",
     }
     if key in display:
         return display[key]
-    if key in {"yes", "no"}:
+    if key in {"yes", "no", "male", "female", "daily", "never", "occasionally", "sometimes", "frequent", "often"}:
         return key.title()
     return key[:1].upper() + key[1:]
 
 
 def categorical_options(data, col):
-    """Return one representative raw value per standardized clinical/questionnaire choice.
+    """Return a clean, deduplicated option list for every categorical field.
 
-    The model still receives a value that existed in the training cohort, while
-    the user sees a clean list with case/spelling duplicates removed.
+    Each displayed category maps back to the most frequent equivalent raw value
+    from the training cohort. Thus the UI is standardized without inventing new
+    model categories or changing the underlying audited dataset.
     """
     if col not in data.columns:
         return [("Unknown", "Unknown")]
@@ -272,11 +336,8 @@ def categorical_options(data, col):
         if key not in grouped or count > grouped[key][1]:
             grouped[key] = (raw, int(count))
 
-    # Always include Unknown as an explicit option.
     grouped.setdefault("unknown", ("Unknown", 0))
 
-    # Put the most common standardized category first, then alphabetical choices,
-    # and Unknown last for a cleaner clinical form.
     non_unknown = [(k, v) for k, v in grouped.items() if k != "unknown"]
     non_unknown.sort(key=lambda item: (-item[1][1], _choice_display(item[0]).lower()))
     ordered = non_unknown + [("unknown", grouped["unknown"])]
