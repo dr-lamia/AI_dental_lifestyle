@@ -13,11 +13,14 @@ from component_pipeline import (
     clinical_profile,
 )
 from clinical_guidelines import build_guideline_action_plan, GUIDELINE_REFERENCES
+from decision_support_display import (
+    model_reliability, clinical_concern_map, recommendation_trigger_summary,
+)
 from data.master160_embedded import load_master160
 
 st.set_page_config(page_title="Dental AI Coach – Audited Research Prototype", layout="wide")
 st.title("Dental AI Coach")
-st.caption("Detailed Elham oral-health profile, explainable component-specific AI, and evidence-based personalized action planning")
+st.caption("Detailed Elham oral-health profile, transparent component-specific AI, clinical concern mapping, and evidence-based personalized action planning")
 
 
 @st.cache_data(show_spinner=False)
@@ -129,7 +132,6 @@ def _choice_key(value, col):
         return "yes"
     if s in {"no", "n", "false", "0"}:
         return "no"
-
     aliases = {
         "own": "owned", "owner": "owned", "owned": "owned",
         "rent": "rented", "rental": "rented", "rented": "rented",
@@ -246,14 +248,14 @@ if source_mode == "Existing study participant":
 else:
     entered = new_patient_form(df)
     if entered is None:
-        st.info("Complete the new-patient form and click 'Analyze new patient' to generate the Elham profile, model-attribution factors, and guideline-based personalized recommendations.")
+        st.info("Complete the new-patient form and click 'Analyze new patient' to generate the Elham profile, concern map, model-attribution factors, and guideline-based personalized recommendations.")
         st.stop()
     patient = pd.Series(entered)
     st.success("New patient data loaded for analysis. The patient is not added to the research training cohort.")
 
-profile_tab, ai_tab, explain_tab, plan_tab, validation_tab, design_tab = st.tabs([
-    "Detailed oral-health profile", "Component-specific AI", "Most affecting factors",
-    "Personalized action plan", "Validation", "Study meaning"
+profile_tab, concern_tab, ai_tab, explain_tab, plan_tab, validation_tab, design_tab = st.tabs([
+    "Detailed oral-health profile", "Clinical concern map", "Component-specific AI",
+    "Most affecting factors", "Personalized action plan", "Validation", "Study meaning"
 ])
 
 with profile_tab:
@@ -274,19 +276,40 @@ with profile_tab:
         st.pyplot(fig)
     st.caption("The total is descriptive. Leakage-safe AI models analyze sufficiently prevalent Elham components separately rather than predicting the total from its own component counts.")
 
+with concern_tab:
+    st.subheader("Clinical concern map")
+    st.write("This organizes the entered examination and modifiable factors into domains for clinician review. The categories are heuristic decision-support labels, not validated diagnostic or prognostic scores.")
+    concern = clinical_concern_map(patient.to_dict())
+    st.dataframe(concern, use_container_width=True, hide_index=True)
+    high_n = int((concern["Concern"] == "High").sum())
+    moderate_n = int((concern["Concern"] == "Moderate").sum())
+    low_n = int((concern["Concern"] == "Low").sum())
+    c1, c2, c3 = st.columns(3)
+    c1.metric("High-concern domains", high_n)
+    c2.metric("Moderate-concern domains", moderate_n)
+    c3.metric("Low-concern domains", low_n)
+    st.caption("Concern level helps structure review only. It must not be interpreted as disease probability, severity staging, or a treatment indication without direct clinical assessment.")
+
 with ai_tab:
     st.subheader("Component-specific AI estimates from nonclinical factors")
     rows = []
     for target, result in results.items():
+        rel = model_reliability(result, model_name)
         rows.append({
             "Clinical component": result.label,
             "Observed clinical count": safe_num(patient.get(target)),
             "AI-estimated count from patient factors": predict_component(result, patient.to_dict(), model_name),
             "Cohort prevalence": result.prevalence,
+            "Model reliability": rel["label"],
+            "Use": rel["level"],
         })
     table = pd.DataFrame(rows)
     st.dataframe(table.style.format({"Observed clinical count":"{:.0f}", "AI-estimated count from patient factors":"{:.2f}", "Cohort prevalence":"{:.1%}"}), use_container_width=True, hide_index=True)
-    st.caption("Observed counts come from examination. AI estimates use demographic, socioeconomic, behavioral, dietary and salivary inputs only and do not replace examination.")
+    st.caption("Reliability labels are derived from internal five-fold validation against the mean baseline. They are not probabilities of correctness. Observed counts from examination remain the clinical reference.")
+    for target, result in results.items():
+        rel = model_reliability(result, model_name)
+        if rel["label"] == "No demonstrated predictive advantage":
+            st.warning(f"{result.label}: {rel['note']} The AI estimate should not be used for individual clinical prediction.")
 
 with explain_tab:
     st.subheader("Most affecting patient factors for the recorded Elham findings")
@@ -311,6 +334,8 @@ with explain_tab:
         explain_df["Patient factor"] = explain_df["field"].map(pretty_label)
         explain_df["Direction in model"] = np.where(explain_df["Model contribution"] > 0, "Pushes estimated count upward", "Pushes estimated count downward")
         st.dataframe(explain_df[["Patient factor", "Model contribution", "Direction in model"]], use_container_width=True, hide_index=True)
+    rel = model_reliability(results[selected_target], model_name)
+    st.info(f"Reliability for this model/component: {rel['label']} — {rel['note']}")
     st.caption("SHAP direction describes the fitted model, not a harmful/protective causal effect. It prioritizes clinician review but does not itself generate treatment indications.")
 
 with plan_tab:
@@ -344,7 +369,8 @@ with plan_tab:
         with st.container(border=True):
             st.markdown(f"**{r['priority']} priority — {r['domain']}**")
             st.write(r["recommendation"])
-            st.caption(f"Why: {r['rationale']}")
+            st.caption(f"Triggered by: {recommendation_trigger_summary(patient.to_dict(), r['domain'])}")
+            st.caption(f"Why this recommendation: {r['rationale']}")
             st.caption(f"Guideline basis: {r['evidence_source']}")
 
     with st.expander("Guidelines used by the recommendation engine"):
@@ -359,13 +385,21 @@ with validation_tab:
     rows = []
     for _, result in results.items():
         for model, md in result.metrics.items():
-            rows.append({"Component": result.label, "Model": model, **md})
+            rel = model_reliability(result, model) if model not in {"Mean baseline", "Median baseline"} else None
+            rows.append({
+                "Component": result.label,
+                "Model": model,
+                **md,
+                "Reliability interpretation": rel["label"] if rel else "Reference baseline",
+            })
     perf = pd.DataFrame(rows)
     st.dataframe(perf.style.format({"R2":"{:.3f}", "MAE":"{:.3f}", "RMSE":"{:.3f}"}), use_container_width=True, hide_index=True)
-    st.caption("Five-fold out-of-fold results are shown with mean and median baselines. Performance is modest; the app is a research decision-support prototype.")
+    st.caption("Five-fold out-of-fold results are shown with mean and median baselines. Reliability interpretation is intentionally conservative; the app remains a research decision-support prototype.")
 
 with design_tab:
     st.subheader("What this app is designed to do")
+    st.write("The interface separates three layers: (1) entered clinical findings, (2) explainable AI associations with explicit reliability indicators, and (3) guideline-based personalized clinical actions. This separation prevents weak model predictions from being mistaken for diagnosis or treatment advice.")
+    st.write("The clinical concern map organizes caries/restorative, periodontal/plaque-control, developmental enamel, tooth-surface-loss, trauma, and missing/developing-dentition domains. These concern labels are heuristic review aids, not validated risk scores.")
     st.write("For a new patient, the dentist enters the detailed Elham clinical findings plus demographic, socioeconomic, behavioral, dietary and salivary information. The app retains the full Elham profile, estimates sufficiently prevalent components from independent nonclinical factors, displays patient-specific model attributions, and produces an evidence-based clinician-reviewable action plan.")
     st.write("The recommendation engine is deliberately separated from the ML model. Clinical findings and recorded modifiable factors trigger guideline-based recommendations; SHAP only changes which factors are reviewed first.")
     st.write("The calculated Elham total is retained as a descriptive summary and is not predicted from its own component findings, preventing target leakage.")
