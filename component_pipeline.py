@@ -3,11 +3,11 @@
 Scientific purpose
 ------------------
 Elham's Index is retained as a detailed clinical oral-health profile rather than
-collapsed into a single machine-learning target.  Each sufficiently prevalent
+collapsed into a single machine-learning target. Each sufficiently prevalent
 clinical component is modeled separately from independently collected
 demographic, socioeconomic, behavioral, dietary and salivary predictors.
 
-These models describe cross-sectional predictive associations.  They do not
+These models describe cross-sectional predictive associations. They do not
 establish causality and they do not forecast future disease without longitudinal
 follow-up data.
 """
@@ -27,8 +27,10 @@ from analysis_pipeline import (
 
 # Components sufficiently represented in the audited raw clinical cohort to
 # justify component-specific exploratory/internal modeling.
+# IMPORTANT: the missing-tooth field includes wisdom teeth. In this adolescent
+# cohort it must not automatically be interpreted as disease-related tooth loss.
 MODELED_COMPONENTS = {
-    "missing_0_including_wisdom_": "Missing teeth including wisdom teeth",
+    "missing_0_including_wisdom_": "Teeth recorded as missing (including wisdom teeth)",
     "decayed_1": "Decayed teeth",
     "filled_2": "Filled teeth",
     "hypocalcification_4": "Hypocalcified teeth",
