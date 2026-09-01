@@ -3,17 +3,25 @@ import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 
-from analysis_pipeline import canonicalize, analysis_data
-from component_pipeline import MODELED_COMPONENTS, fit_all_components_for_app, clinical_profile
+from analysis_pipeline import (
+    canonicalize, analysis_data, DEMOGRAPHIC_COLS, SES_COLS, BEHAVIOR_COLS,
+    SALIVARY_COLS, ELHAM_DIRECT_COMPONENTS,
+)
+from component_pipeline import (
+    MODELED_COMPONENTS, DESCRIPTIVE_COMPONENTS, fit_all_components_for_app,
+    clinical_profile,
+)
 from data.master160_embedded import load_master160
 
 st.set_page_config(page_title="Dental AI Coach – Audited Research Prototype", layout="wide")
 st.title("Dental AI Coach")
-st.caption("Detailed Elham oral-health profile, component-specific AI analysis, and personalized action planning")
+st.caption("Detailed Elham oral-health profile, explainable component-specific AI, and personalized action planning")
+
 
 @st.cache_data(show_spinner=False)
 def load_data():
     return canonicalize(load_master160())
+
 
 @st.cache_resource(show_spinner="Loading validated component-specific models...")
 def train(signature, data):
@@ -27,6 +35,17 @@ def safe_num(v):
 
 def safe_text(v):
     return "Unknown" if pd.isna(v) else str(v).strip()
+
+
+def pretty_label(name):
+    replacements = {
+        "cho": "carbohydrate",
+        "ph": "pH",
+        "of": "number of",
+    }
+    words = str(name).replace("_", " ").split()
+    words = [replacements.get(w.lower(), w) for w in words]
+    return " ".join(words).capitalize()
 
 
 def predict_component(result, row, model_name):
@@ -57,7 +76,7 @@ def transformed_feature_groups(pipe, original_cols):
 
 
 def local_model_factors(result, row, model_name, top_n=6):
-    """Return patient-level grouped SHAP factors for model review, not causal effects."""
+    """Patient-level grouped SHAP factors for model review, not causal effects."""
     try:
         import shap
         pipe = result.xgb_final if model_name in {"XGBoost", "Blend"} and result.xgb_final is not None else result.rf_final
@@ -77,13 +96,34 @@ def local_model_factors(result, row, model_name, top_n=6):
         return []
 
 
-def action_plan(row):
-    """Clinician-reviewable plan combining direct findings with modifiable inputs.
+def overall_model_factors(results, row, model_name, top_n=10):
+    """Aggregate absolute local attribution across modeled Elham components."""
+    combined = {}
+    signed = {}
+    for result in results.values():
+        for factor, contribution in local_model_factors(result, row, model_name, top_n=999):
+            combined[factor] = combined.get(factor, 0.0) + abs(contribution)
+            signed[factor] = signed.get(factor, 0.0) + contribution
+    ranked = sorted(combined, key=combined.get, reverse=True)[:top_n]
+    return pd.DataFrame([
+        {
+            "Patient factor": pretty_label(f),
+            "Relative model influence": combined[f],
+            "Net direction across modeled findings": "Upward" if signed[f] > 0 else "Downward",
+            "field": f,
+        }
+        for f in ranked
+    ])
 
-    This layer does not infer causality from the ML model and intentionally avoids
-    drug doses or fixed recall intervals.
+
+def action_plan(row, prioritized_fields=None):
+    """Clinician-reviewable plan combining findings and recorded modifiable inputs.
+
+    Model attribution is used only to prioritize review. Recommendations remain
+    rule/guideline based and do not treat SHAP values as causal treatment effects.
     """
     clinical_priorities, modifiable_factors, recommendations = [], [], []
+    prioritized_fields = prioritized_fields or []
 
     decay = safe_num(row.get("decayed_1"))
     missing = safe_num(row.get("missing_0_including_wisdom_"))
@@ -112,35 +152,31 @@ def action_plan(row):
         recommendations.append("Investigate the likely etiology of tooth-surface loss before selecting preventive or restorative management.")
     if missing > 0:
         clinical_priorities.append(f"Teeth recorded as missing including wisdom teeth: {int(missing)}")
-        recommendations.append("Interpret the missing-tooth count cautiously: this variable includes wisdom teeth. Verify eruption/developmental status and distinguish third molars from disease-related tooth loss before assigning treatment need.")
+        recommendations.append("Interpret the missing-tooth count cautiously because it includes wisdom teeth. Verify eruption/developmental status before assigning disease-related tooth loss or treatment need.")
 
     def txt(c):
         return safe_text(row.get(c, "Unknown")).lower()
 
+    triggers = []
     brushing = txt("tooth_brushing_frequency")
     if any(k in brushing for k in ["never", "once/day", "once a day", "once"]):
-        modifiable_factors.append("Suboptimal brushing frequency")
-        recommendations.append("Oral-hygiene priority: reinforce twice-daily toothbrushing with age-appropriate fluoride toothpaste and individualized technique coaching.")
+        triggers.append(("tooth_brushing_frequency", "Suboptimal brushing frequency", "Reinforce twice-daily toothbrushing with age-appropriate fluoride toothpaste and individualized technique coaching."))
 
     interdental = txt("interdental_cleaning")
     if interdental.startswith("no"):
-        modifiable_factors.append("No reported interdental cleaning")
-        recommendations.append("Introduce a suitable daily interdental-cleaning method where clinically appropriate.")
+        triggers.append(("interdental_cleaning", "No reported interdental cleaning", "Introduce a suitable daily interdental-cleaning method where clinically appropriate."))
 
     sugar = txt("sugar")
     if any(k in sugar for k in ["daily", "frequent", "twice", "once a day"]):
-        modifiable_factors.append("Frequent free-sugar exposure")
-        recommendations.append("Reduce the frequency of free-sugar exposure, especially between meals.")
+        triggers.append(("sugar", "Frequent free-sugar exposure", "Reduce the frequency of free-sugar exposure, especially between meals."))
 
     snacks = txt("snacks_frequency")
     if any(k in snacks for k in ["daily", "often", "frequent", "3+"]):
-        modifiable_factors.append("Frequent between-meal snacking")
-        recommendations.append("Reduce frequent cariogenic between-meal snacks and favor lower-cariogenic alternatives.")
+        triggers.append(("snacks_frequency", "Frequent between-meal snacking", "Reduce frequent cariogenic between-meal snacks and favor lower-cariogenic alternatives."))
 
     carbonated = txt("carbonated_beverages") + " " + txt("carbonated_beverages_diet")
     if any(k in carbonated for k in ["daily", "frequent", "once/day", "twice"]):
-        modifiable_factors.append("Frequent carbonated/acidic beverage exposure")
-        recommendations.append("Reduce frequent carbonated/acidic beverage exposure and favor water as the routine drink.")
+        triggers.append(("carbonated_beverages", "Frequent carbonated/acidic beverage exposure", "Reduce frequent carbonated/acidic beverage exposure and favor water as the routine drink."))
 
     saliva_flags = []
     if "low" in txt("buffering_capacity"):
@@ -148,8 +184,7 @@ def action_plan(row):
     if "acid" in txt("salivary_ph"):
         saliva_flags.append("acidic salivary pH")
     if saliva_flags:
-        modifiable_factors.append("Salivary vulnerability: " + ", ".join(saliva_flags))
-        recommendations.append("Review hydration, dietary acid exposure and clinically indicated preventive measures in light of the recorded salivary findings.")
+        triggers.append(("buffering_capacity", "Salivary vulnerability: " + ", ".join(saliva_flags), "Review hydration, dietary acid exposure and clinically indicated preventive measures in light of the salivary findings."))
 
     microbial_flags = []
     if "more" in txt("mutans_load_in_saliva"):
@@ -157,8 +192,14 @@ def action_plan(row):
     if "more" in txt("lactobacilli_load_in_saliva"):
         microbial_flags.append("higher lactobacilli category")
     if microbial_flags:
-        modifiable_factors.append("Microbial/salivary profile: " + ", ".join(microbial_flags))
-        recommendations.append("Intensify plaque control and reduce fermentable-carbohydrate frequency; any adjunctive measure requires clinician judgment.")
+        triggers.append(("mutans_load_in_saliva", "Microbial/salivary profile: " + ", ".join(microbial_flags), "Intensify plaque control and reduce fermentable-carbohydrate frequency; adjunctive measures require clinician judgment."))
+
+    # Put recorded modifiable factors that are also highly ranked by the model first.
+    priority_order = {field: i for i, field in enumerate(prioritized_fields)}
+    triggers.sort(key=lambda x: priority_order.get(x[0], 999))
+    for _, label, recommendation in triggers:
+        modifiable_factors.append(label)
+        recommendations.append(recommendation)
 
     recommendations = list(dict.fromkeys(recommendations))
     if not recommendations:
@@ -166,19 +207,100 @@ def action_plan(row):
     return clinical_priorities, modifiable_factors, recommendations
 
 
+def categorical_options(data, col):
+    if col not in data.columns:
+        return ["Unknown"]
+    vals = [safe_text(v) for v in data[col].dropna().tolist()]
+    vals = list(dict.fromkeys(vals))
+    vals = [v for v in vals if v and v.lower() != "nan"]
+    if not vals:
+        return ["Unknown"]
+    counts = data[col].astype(str).value_counts()
+    mode = safe_text(counts.index[0]) if len(counts) else vals[0]
+    ordered = [mode] + sorted([v for v in vals if v != mode], key=str.lower)
+    if "Unknown" not in ordered:
+        ordered.append("Unknown")
+    return ordered
+
+
+def render_predictor_inputs(data, columns, prefix):
+    values = {}
+    visible = [c for c in columns if c in data.columns]
+    grid = st.columns(2)
+    for i, col in enumerate(visible):
+        with grid[i % 2]:
+            series = data[col]
+            label = pretty_label(col)
+            if pd.api.types.is_numeric_dtype(series):
+                med = pd.to_numeric(series, errors="coerce").median()
+                med = 0.0 if pd.isna(med) else float(med)
+                values[col] = st.number_input(label, value=med, step=1.0, key=f"{prefix}_{col}")
+            else:
+                options = categorical_options(data, col)
+                values[col] = st.selectbox(label, options, key=f"{prefix}_{col}")
+    return values
+
+
+def new_patient_form(data):
+    all_components = {**MODELED_COMPONENTS, **DESCRIPTIVE_COMPONENTS}
+    with st.form("new_patient_form"):
+        st.subheader("Enter a new patient's data")
+        st.caption("Enter the detailed Elham clinical findings and the independently collected patient factors. No existing participant record is used for the new patient.")
+
+        new = {"id": "NEW_PATIENT"}
+        with st.expander("A. Detailed Elham clinical findings", expanded=True):
+            st.write("Enter the number of teeth/units recorded for each finding.")
+            cols = st.columns(4)
+            for i, (field, label) in enumerate(all_components.items()):
+                with cols[i % 4]:
+                    new[field] = st.number_input(label, min_value=0, max_value=32, value=0, step=1, key=f"new_{field}")
+
+        with st.expander("B. Demographic factors", expanded=True):
+            new.update(render_predictor_inputs(data, DEMOGRAPHIC_COLS, "new_demo"))
+        with st.expander("C. Socioeconomic and access factors"):
+            new.update(render_predictor_inputs(data, SES_COLS, "new_ses"))
+        with st.expander("D. Behavioral and dietary factors"):
+            new.update(render_predictor_inputs(data, BEHAVIOR_COLS, "new_beh"))
+        with st.expander("E. Salivary factors"):
+            new.update(render_predictor_inputs(data, SALIVARY_COLS, "new_saliva"))
+
+        submitted = st.form_submit_button("Analyze new patient", type="primary", use_container_width=True)
+
+    if submitted:
+        new["elham_s_index_including_wisdom"] = float(sum(safe_num(new.get(c, 0)) for c in ELHAM_DIRECT_COMPONENTS))
+        st.session_state["new_patient_data"] = new
+    return st.session_state.get("new_patient_data")
+
+
 df = load_data()
 eligible, audit = analysis_data(df)
 results = train(f"{df.shape}-{int(audit['target_consistent'].sum())}", df)
 
-st.success(f"Audited raw-data cohort loaded: {len(df)} matched participants; {int(audit['target_consistent'].sum())} passed Elham arithmetic QC.")
-st.warning("Research decision-support prototype. Current data are cross-sectional: results describe internal predictive associations and do not prove causation or forecast future disease. Longitudinal follow-up is required for genuine future prediction.")
+st.success(f"Audited reference cohort loaded: {len(df)} matched participants; {int(audit['target_consistent'].sum())} passed Elham arithmetic QC.")
+st.warning("Research decision-support prototype. Current data are cross-sectional: model attributions are associations, not proof of causation or future disease forecasting.")
 
-patient_id = st.sidebar.selectbox("Participant", eligible["id"].tolist())
-model_name = st.sidebar.selectbox("Model", ["Random Forest", "XGBoost", "Blend"])
-patient = eligible.loc[eligible["id"] == patient_id].iloc[0]
+source_mode = st.sidebar.radio("Patient source", ["New patient", "Existing study participant"], index=0)
+available_models = ["Random Forest"]
+if all(r.xgb_final is not None for r in results.values()):
+    available_models += ["XGBoost", "Blend"]
+model_name = st.sidebar.selectbox("AI model", available_models)
+
+if source_mode == "Existing study participant":
+    patient_id = st.sidebar.selectbox("Participant", eligible["id"].tolist())
+    patient = eligible.loc[eligible["id"] == patient_id].iloc[0]
+    patient_ready = True
+    st.info("Viewing a participant from the audited study cohort. Select 'New patient' in the sidebar to enter a completely new case.")
+else:
+    entered = new_patient_form(df)
+    if entered is None:
+        st.info("Complete the new-patient form and click 'Analyze new patient' to generate the Elham profile, model-attribution factors, and personalized recommendations.")
+        st.stop()
+    patient = pd.Series(entered)
+    patient_ready = True
+    st.success("New patient data loaded for analysis. The patient is not added to the research training cohort.")
 
 profile_tab, ai_tab, explain_tab, plan_tab, validation_tab, design_tab = st.tabs([
-    "Detailed oral-health profile", "Component-specific AI", "Factors to review",
+    "Detailed oral-health profile", "Component-specific AI", "Most affecting factors",
     "Personalized action plan", "Validation", "Study meaning"
 ])
 
@@ -186,6 +308,10 @@ with profile_tab:
     st.subheader("Detailed Elham clinical profile")
     profile = clinical_profile(patient)
     profile["status"] = np.where(profile["count"] > 0, "Present", "Not recorded")
+    total_elham = float(profile["count"].sum())
+    c1, c2 = st.columns(2)
+    c1.metric("Calculated Elham Index total", f"{total_elham:.0f}")
+    c2.metric("Clinical findings present", int((profile["count"] > 0).sum()))
     st.dataframe(profile, use_container_width=True, hide_index=True)
     shown = profile.loc[profile["count"] > 0]
     if not shown.empty:
@@ -194,80 +320,94 @@ with profile_tab:
         ax.set_xlabel("Number of teeth / recorded units")
         ax.set_title("Clinical oral-health profile")
         st.pyplot(fig)
-    st.caption("The total Elham score is not used as the main AI target here. The detailed component profile is retained because it contains more clinically useful information.")
+    st.caption("The total is displayed descriptively. The leakage-safe AI models analyze sufficiently prevalent Elham components separately rather than predicting the total from its own component counts.")
 
 with ai_tab:
-    st.subheader("Component-specific AI estimates")
+    st.subheader("Component-specific AI estimates from nonclinical factors")
     rows = []
     for target, result in results.items():
         rows.append({
             "Clinical component": result.label,
             "Observed clinical count": safe_num(patient.get(target)),
-            "AI-estimated count": predict_component(result, patient.to_dict(), model_name),
+            "AI-estimated count from patient factors": predict_component(result, patient.to_dict(), model_name),
             "Cohort prevalence": result.prevalence,
         })
     table = pd.DataFrame(rows)
-    st.dataframe(table.style.format({"Observed clinical count":"{:.0f}", "AI-estimated count":"{:.2f}", "Cohort prevalence":"{:.1%}"}), use_container_width=True, hide_index=True)
-    st.caption("The observed value comes from the dental examination. The AI estimate shows how much information the non-index factors contain about that component; it does not replace examination and is not a future forecast.")
+    st.dataframe(table.style.format({"Observed clinical count":"{:.0f}", "AI-estimated count from patient factors":"{:.2f}", "Cohort prevalence":"{:.1%}"}), use_container_width=True, hide_index=True)
+    st.caption("The observed count comes from the entered examination. The AI estimate uses demographic, socioeconomic, behavioral, dietary and salivary inputs only. The difference is not a diagnostic error score and the estimate does not replace examination.")
 
 with explain_tab:
-    st.subheader("Patient factors the model uses")
-    st.write("Select a clinical component to see the strongest patient-level model contributions. These are model-attribution signals for review, not evidence that a factor causes disease.")
-    selected_target = st.selectbox("Clinical component", list(MODELED_COMPONENTS), format_func=lambda x: MODELED_COMPONENTS[x])
-    result = results[selected_target]
-    factors = local_model_factors(result, patient.to_dict(), model_name)
-    if factors:
-        explain_df = pd.DataFrame(factors, columns=["Patient factor", "Model contribution"])
-        explain_df["Direction in model"] = np.where(explain_df["Model contribution"] > 0, "Pushes estimate upward", "Pushes estimate downward")
-        st.dataframe(explain_df, use_container_width=True, hide_index=True)
-        fig, ax = plt.subplots(figsize=(8, 5))
-        ax.barh(explain_df["Patient factor"][::-1], explain_df["Model contribution"][::-1])
-        ax.axvline(0)
-        ax.set_xlabel("Grouped SHAP contribution")
-        ax.set_title(f"Patient-level model factors: {result.label}")
+    st.subheader("Most affecting patient factors for the recorded Elham findings")
+    st.write("The first table combines patient-level model attribution across the four modeled Elham findings. A larger value means the factor had greater influence on this patient's model outputs. It does not mean the factor caused the clinical finding.")
+    overall = overall_model_factors(results, patient.to_dict(), model_name, top_n=10)
+    if not overall.empty:
+        display_overall = overall.drop(columns=["field"]).copy()
+        st.dataframe(display_overall.style.format({"Relative model influence": "{:.3f}"}), use_container_width=True, hide_index=True)
+        fig, ax = plt.subplots(figsize=(9, 5))
+        plot_df = display_overall.iloc[::-1]
+        ax.barh(plot_df["Patient factor"], plot_df["Relative model influence"])
+        ax.set_xlabel("Aggregated absolute SHAP influence")
+        ax.set_title("Most influential patient factors across modeled Elham findings")
         st.pyplot(fig)
     else:
         st.info("Patient-level model explanation is unavailable in this environment.")
-    st.caption("Changing one of these inputs cannot be assumed to change the clinical outcome by the displayed amount. The current study is observational and cross-sectional.")
+
+    st.markdown("#### Explain one clinical finding")
+    selected_target = st.selectbox("Elham clinical component", list(MODELED_COMPONENTS), format_func=lambda x: MODELED_COMPONENTS[x])
+    result = results[selected_target]
+    factors = local_model_factors(result, patient.to_dict(), model_name)
+    if factors:
+        explain_df = pd.DataFrame(factors, columns=["field", "Model contribution"])
+        explain_df["Patient factor"] = explain_df["field"].map(pretty_label)
+        explain_df["Direction in model"] = np.where(explain_df["Model contribution"] > 0, "Pushes estimated count upward", "Pushes estimated count downward")
+        st.dataframe(explain_df[["Patient factor", "Model contribution", "Direction in model"]], use_container_width=True, hide_index=True)
+    st.caption("SHAP direction describes the fitted model, not a harmful/protective causal effect. Recommendations below are therefore based on the entered clinical findings and modifiable risk information, with model attribution used only to prioritize what should be reviewed.")
 
 with plan_tab:
     st.subheader("Personalized oral-health action plan")
-    priorities, modifiable, advice = action_plan(patient.to_dict())
+    overall_for_plan = overall_model_factors(results, patient.to_dict(), model_name, top_n=15)
+    prioritized_fields = overall_for_plan["field"].tolist() if not overall_for_plan.empty else []
+    priorities, modifiable, advice = action_plan(patient.to_dict(), prioritized_fields)
 
-    st.markdown("#### 1. Clinical priorities from the examination")
+    st.markdown("#### 1. Clinical priorities from the entered Elham examination")
     if priorities:
         for x in priorities:
             st.write(f"• {x}")
     else:
-        st.write("No major modeled clinical component was recorded for this participant.")
+        st.write("No major modeled clinical component was recorded for this patient.")
 
     st.markdown("#### 2. Modifiable factors to review")
     if modifiable:
         for x in modifiable:
             st.write(f"• {x}")
     else:
-        st.write("No prespecified modifiable trigger was detected from the recorded questionnaire/salivary fields.")
+        st.write("No prespecified modifiable trigger was detected from the entered behavioral, dietary or salivary fields.")
 
-    st.markdown("#### 3. Tailored preventive and clinical recommendations")
+    if prioritized_fields:
+        st.markdown("#### 3. Model-prioritized factors for clinician review")
+        st.write(", ".join(pretty_label(x) for x in prioritized_fields[:6]))
+        st.caption("These factors are prioritized because they influenced this patient's model outputs. They are not automatically treatment targets and should be interpreted with the clinical history.")
+
+    st.markdown("#### 4. Tailored preventive and clinical recommendations")
     for x in advice:
         st.write(f"• {x}")
 
     st.info("This is clinician-reviewable decision support, not an autonomous prescription. Diagnosis, treatment choice, therapeutic dosing and recall intervals require professional judgment and applicable guidelines.")
 
 with validation_tab:
-    st.subheader("Internal validation")
+    st.subheader("Internal validation of the component models")
     rows = []
     for _, result in results.items():
         for model, md in result.metrics.items():
             rows.append({"Component": result.label, "Model": model, **md})
     perf = pd.DataFrame(rows)
     st.dataframe(perf.style.format({"R2":"{:.3f}", "MAE":"{:.3f}", "RMSE":"{:.3f}"}), use_container_width=True, hide_index=True)
-    st.caption("Five-fold out-of-fold results are displayed with mean and median baselines. Modest or negative R² must not be described as high predictive accuracy.")
+    st.caption("Five-fold out-of-fold results are shown with mean and median baselines. These internally validated results are modest and are reported transparently; the app is a research decision-support prototype.")
 
 with design_tab:
-    st.subheader("What this study is trying to do")
-    st.write("The dentist records the patient's detailed Elham oral-health profile. The AI then examines demographic, socioeconomic, behavioral, dietary and salivary information in relation to individual clinical components that are common enough to analyze.")
-    st.write("The aim is to identify patient-specific risk patterns and support a tailored preventive and clinical action plan, rather than to reconstruct one total Elham score from pieces of that same score.")
-    st.write("The recorded missing-tooth component includes wisdom teeth; therefore it must not automatically be interpreted as disease-related tooth loss. Third-molar eruption/developmental status requires clinical verification.")
-    st.write("Rare clinical findings remain part of the patient's Elham profile but are not given separate ML models when too few participants have the condition.")
-    st.write("Future forecasting is a second phase: repeat the clinical examination at follow-up and model change in each component from the baseline profile and baseline risk factors.")
+    st.subheader("What this app is designed to do")
+    st.write("For a new patient, the dentist enters the detailed Elham clinical findings plus demographic, socioeconomic, behavioral, dietary and salivary information. The app then retains the full Elham profile, estimates the sufficiently prevalent components using independent nonclinical factors, shows the patient-specific factors that most influenced those estimates, and generates a clinician-reviewable personalized action plan.")
+    st.write("The calculated Elham total is retained as a descriptive summary of oral status. It is not used as the main machine-learning target because using its own component findings as predictors would create target leakage.")
+    st.write("The recorded missing-tooth component includes wisdom teeth, so third-molar eruption/developmental status must be verified before interpreting it as disease-related tooth loss.")
+    st.write("Rare findings remain visible in the patient's Elham profile even when event counts in the current 160-participant cohort are too small for a reliable separate ML model.")
+    st.write("Future forecasting requires longitudinal follow-up with repeat Elham examination. The present cross-sectional app supports current risk profiling and explainable associations, not future disease prediction.")
