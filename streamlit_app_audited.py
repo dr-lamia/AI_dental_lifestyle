@@ -1,3 +1,4 @@
+import re
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -194,7 +195,6 @@ def action_plan(row, prioritized_fields=None):
     if microbial_flags:
         triggers.append(("mutans_load_in_saliva", "Microbial/salivary profile: " + ", ".join(microbial_flags), "Intensify plaque control and reduce fermentable-carbohydrate frequency; adjunctive measures require clinician judgment."))
 
-    # Put recorded modifiable factors that are also highly ranked by the model first.
     priority_order = {field: i for i, field in enumerate(prioritized_fields)}
     triggers.sort(key=lambda x: priority_order.get(x[0], 999))
     for _, label, recommendation in triggers:
@@ -207,20 +207,80 @@ def action_plan(row, prioritized_fields=None):
     return clinical_priorities, modifiable_factors, recommendations
 
 
+def _choice_key(value, col):
+    """Normalize equivalent categorical labels for the UI without changing training data."""
+    s = safe_text(value)
+    s = re.sub(r"\s+", " ", s).strip().lower()
+    if not s or s in {"nan", "none", "n/a", "na", "unknown", "-"}:
+        return "unknown"
+
+    # Field-specific aliases found in the source questionnaire.
+    aliases = {
+        "house_owned_or_rent": {
+            "owned": "owned", "own": "owned",
+            "rented": "rented", "rent": "rented",
+        },
+        "father_s_education": {
+            "post graduate level": "postgraduate level",
+            "postgraduate level": "postgraduate level",
+            "school": "school level",
+            "school level": "school level",
+            "university": "university level",
+            "university level": "university level",
+        },
+        "mother_s_education": {
+            "post graduate level": "postgraduate level",
+            "postgraduate level": "postgraduate level",
+            "school": "school level",
+            "school level": "school level",
+            "university": "university level",
+            "university level": "university level",
+        },
+    }
+    return aliases.get(col, {}).get(s, s)
+
+
+def _choice_display(key):
+    display = {
+        "unknown": "Unknown",
+        "owned": "Owned",
+        "rented": "Rented",
+        "postgraduate level": "Postgraduate level",
+        "school level": "School level",
+        "university level": "University level",
+    }
+    if key in display:
+        return display[key]
+    if key in {"yes", "no"}:
+        return key.title()
+    return key[:1].upper() + key[1:]
+
+
 def categorical_options(data, col):
+    """Return one representative raw value per standardized clinical/questionnaire choice.
+
+    The model still receives a value that existed in the training cohort, while
+    the user sees a clean list with case/spelling duplicates removed.
+    """
     if col not in data.columns:
-        return ["Unknown"]
-    vals = [safe_text(v) for v in data[col].dropna().tolist()]
-    vals = list(dict.fromkeys(vals))
-    vals = [v for v in vals if v and v.lower() != "nan"]
-    if not vals:
-        return ["Unknown"]
-    counts = data[col].astype(str).value_counts()
-    mode = safe_text(counts.index[0]) if len(counts) else vals[0]
-    ordered = [mode] + sorted([v for v in vals if v != mode], key=str.lower)
-    if "Unknown" not in ordered:
-        ordered.append("Unknown")
-    return ordered
+        return [("Unknown", "Unknown")]
+
+    counts = data[col].map(safe_text).value_counts()
+    grouped = {}
+    for raw, count in counts.items():
+        key = _choice_key(raw, col)
+        if key not in grouped or count > grouped[key][1]:
+            grouped[key] = (raw, int(count))
+
+    # Always include Unknown as an explicit option.
+    grouped.setdefault("unknown", ("Unknown", 0))
+
+    # Put the most common standardized category first, then alphabetical choices,
+    # and Unknown last for a cleaner clinical form.
+    non_unknown = [(k, v) for k, v in grouped.items() if k != "unknown"]
+    non_unknown.sort(key=lambda item: (-item[1][1], _choice_display(item[0]).lower()))
+    ordered = non_unknown + [("unknown", grouped["unknown"])]
+    return [(raw_count[0], _choice_display(key)) for key, raw_count in ordered]
 
 
 def render_predictor_inputs(data, columns, prefix):
@@ -236,8 +296,15 @@ def render_predictor_inputs(data, columns, prefix):
                 med = 0.0 if pd.isna(med) else float(med)
                 values[col] = st.number_input(label, value=med, step=1.0, key=f"{prefix}_{col}")
             else:
-                options = categorical_options(data, col)
-                values[col] = st.selectbox(label, options, key=f"{prefix}_{col}")
+                choices = categorical_options(data, col)
+                raw_options = [raw for raw, _ in choices]
+                display_map = {raw: display for raw, display in choices}
+                values[col] = st.selectbox(
+                    label,
+                    raw_options,
+                    format_func=lambda x, m=display_map: m.get(x, safe_text(x)),
+                    key=f"{prefix}_{col}",
+                )
     return values
 
 
