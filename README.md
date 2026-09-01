@@ -23,7 +23,7 @@ The uploaded raw workbooks identify:
 - 45 non-clinical records without a corresponding raw clinical assessment;
 - all 160 raw clinical records pass the documented Elham component-sum arithmetic check.
 
-The repository's older processed CSV remains only a temporary branch default. It should not be treated as the definitive manuscript dataset. The audited 160-case reconstruction should be used for final manuscript analysis and production deployment.
+The audited 160-case reconstruction is now embedded in the research branch and is the default source for `streamlit_app_audited.py`. The older processed CSV is retained only for historical/reproducibility comparison and should not be used for final manuscript claims.
 
 ## Component-specific modeling
 The current cohort supports separate exploratory/internal models for the components with adequate prevalence, principally:
@@ -33,6 +33,8 @@ The current cohort supports separate exploratory/internal models for the compone
 - filled teeth;
 - hypocalcified teeth.
 
+The missing-tooth variable includes wisdom teeth and must therefore be interpreted cautiously in this adolescent cohort. It cannot automatically be labeled disease-related tooth loss; eruption/developmental status requires clinical verification.
+
 Rare findings such as fluorosis, erosion, abrasion, attrition, abfraction, sealants, fractures, pontics, implant crowns and veneers remain part of the detailed clinical profile but should not receive separate ML models when event counts are too small.
 
 ## Current component-model findings
@@ -41,17 +43,28 @@ The leakage-safe analyses show only modest predictive signal from the independen
 ## Primary files
 - `analysis_pipeline.py` – leakage-safe preprocessing, five-fold validation, baselines and fairness screening.
 - `component_pipeline.py` – component-specific Elham modeling.
-- `streamlit_app_component.py` – redesigned dashboard with detailed oral-health profile, component-specific AI, patient-level explanations and personalized action plan.
+- `streamlit_app_audited.py` – preferred audited 160-case research dashboard.
+- `streamlit_app_component.py` – component-specific dashboard that can accept an uploaded audited dataset.
 - `streamlit_app_q1.py` – previous total-score research interface retained for comparison only.
-- `METHODOLOGY_Q1.md` – methods specification; should be updated to the component-specific manuscript framing before submission.
+- `METHODOLOGY_Q1.md` – manuscript-ready component-specific methods specification.
+- `data/master160_embedded.py` – embedded deidentified 160-case audited analysis cohort used by the preferred research app.
+- `data/raw_reconstructed_160.csv` – deidentified reconstructed analysis table retained for transparent inspection.
 - `data/DATA_DICTIONARY_Q1.md` – predictor/outcome/clinical-rule variable roles.
 - `scripts/prepare_dataset.py` – derived-dataset/QC utility; the source file is not overwritten.
 
-## Clinical recommendation layer
-The recommendation engine combines direct clinical findings with modifiable patient factors to generate a clinician-reviewable personalized oral-health action plan. It is not an autonomous prescription system. Diagnosis, treatment selection, medication/therapeutic dosing and definitive recall intervals remain the responsibility of the treating clinician and applicable guidance.
+## Personalized recommendation layer
+The preferred audited app separates three outputs:
+
+1. direct clinical priorities from the detailed Elham examination;
+2. modifiable behavioral/dietary/salivary factors that should be reviewed;
+3. clinician-reviewable preventive and clinical recommendations.
+
+Patient-level SHAP explanations are displayed separately as model-attribution signals. They are not treated as causal effects and are not automatically converted into treatment instructions.
+
+The recommendation engine is not an autonomous prescription system. Diagnosis, treatment selection, medication/therapeutic dosing and definitive recall intervals remain the responsibility of the treating clinician and applicable guidance.
 
 ## Next research phase
 A longitudinal follow-up study should repeat the detailed Elham assessment after a prespecified interval, such as 12 months. Baseline clinical profile, lifestyle, diet, socioeconomic and salivary factors could then be tested as predictors of change in individual oral-health components, allowing genuine future-risk forecasting.
 
 ## Deployment status
-This branch remains a research revision and has not replaced the production Streamlit app. Do not merge or deploy as the final clinical/research version until the audited 160-case dataset is used directly and the component-specific analyses are rerun reproducibly on that exact source.
+The audited component-specific research app is now implemented on the revision branch, but the public production Streamlit deployment has not been replaced. The branch should undergo a final runtime check before merge/deployment. The manuscript should report the audited 160-case analysis and should not use the previous leakage-affected near-perfect metrics.
