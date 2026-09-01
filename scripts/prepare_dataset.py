@@ -1,67 +1,57 @@
-"""Prepare a reproducible analysis copy of the Dental AI Coach dataset.
+"""Create a derived, audited analysis copy for Dental AI Coach.
 
-The script NEVER overwrites the source file. It standardizes missing values,
-checks the Elham Index arithmetic, and writes a cleaned analysis CSV plus a QC
-summary. Direct target components remain in the output for auditing and the
-rule-based clinical layer, but analysis_pipeline.py excludes them from ML inputs.
+The source CSV is never overwritten. Outcome arithmetic is checked using the
+same rules as the validation pipeline. Inconsistent records remain traceable in
+the QC file and are marked as ineligible rather than silently corrected.
 """
 from pathlib import Path
 import json
-import numpy as np
 import pandas as pd
 
-from analysis_pipeline import TARGET, TARGET_COMPONENTS, canonicalize, predictor_columns, validate_no_leakage
+from analysis_pipeline import (
+    TARGET, TARGET_COMPONENTS, canonicalize, predictor_columns,
+    validate_no_leakage, target_audit,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "data" / "no_recommendation_dental_dataset_cleaned_keep_including_wisdom.csv"
+SOURCE = ROOT / "no_recommendation_dental_dataset_cleaned_keep_including_wisdom.csv"
 OUT = ROOT / "data" / "analysis_dataset_clean.csv"
+AUDIT_OUT = ROOT / "data" / "target_arithmetic_qc.csv"
 QC = ROOT / "data" / "dataset_qc.json"
 
 
 def main():
     raw = pd.read_csv(SOURCE)
     df = canonicalize(raw)
-
-    if TARGET not in df.columns:
-        raise ValueError(f"Missing target column: {TARGET}")
-
-    present_components = [c for c in TARGET_COMPONENTS if c in df.columns]
-    direct_components = [
-        c for c in present_components
-        if c not in {"missing_0_excluding_ortho_", "sound_teeth", "dmf", "index_of_treatment"}
-    ]
-
-    # Arithmetic audit only. A mismatch is reported, never silently corrected.
-    component_sum = df[direct_components].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1)
-    target = pd.to_numeric(df[TARGET], errors="coerce")
-    diff = target - component_sum
-    exact_match = np.isclose(diff.fillna(np.inf), 0.0)
-
+    audit = target_audit(df)
     predictors = predictor_columns(df)
     validate_no_leakage(predictors)
 
+    df_out = df.copy()
+    df_out["q1_target_consistent"] = audit["target_consistent"].to_numpy()
+
     qc = {
-        "n_rows": int(len(df)),
+        "n_source_rows": int(len(df)),
         "n_columns": int(df.shape[1]),
-        "target_missing": int(target.isna().sum()),
-        "target_component_columns_present": present_components,
-        "direct_component_columns_used_for_arithmetic_audit": direct_components,
-        "rows_where_target_equals_component_sum": int(exact_match.sum()),
-        "rows_where_target_differs_from_component_sum": int((~exact_match & target.notna()).sum()),
+        "target_missing": int(pd.to_numeric(df[TARGET], errors="coerce").isna().sum()),
+        "n_qc_eligible": int(audit["target_consistent"].sum()),
+        "n_qc_excluded": int((~audit["target_consistent"]).sum()),
         "candidate_predictors": predictors,
-        "leakage_exclusions": [c for c in TARGET_COMPONENTS if c in df.columns],
+        "leakage_exclusions_present": [c for c in TARGET_COMPONENTS if c in df.columns],
         "notes": [
-            "Raw source file was not modified.",
-            "Target-derived clinical variables are retained for audit/rule-based care only.",
-            "School, place of birth, and nationality are excluded from predictive modeling.",
-            "Missing categorical values are represented as Unknown; numeric missingness is handled inside each validation fold."
-        ]
+            "The source file was not modified.",
+            "Eligibility requires the stored Elham target to equal the documented direct-component sum.",
+            "Failed rows are retained and flagged rather than corrected.",
+            "Target-derived variables remain available for QC and rule-based care only.",
+            "School, current residence, place of birth and nationality are excluded from the primary prediction model.",
+            "Learned imputation and categorical encoding are fitted inside validation folds."
+        ],
     }
 
-    df.to_csv(OUT, index=False)
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    df_out.to_csv(OUT, index=False)
+    audit.to_csv(AUDIT_OUT, index=False)
     QC.write_text(json.dumps(qc, indent=2), encoding="utf-8")
-    print(f"Wrote: {OUT}")
-    print(f"Wrote: {QC}")
     print(json.dumps(qc, indent=2))
 
 
