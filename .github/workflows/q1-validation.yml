@@ -5,7 +5,6 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Retry triggered after account/billing update on 2026-09-01.
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -70,13 +69,49 @@ jobs:
               json.dump(payload, f, indent=2)
           pd.DataFrame(rows).to_csv(out / 'component_metrics.csv', index=False)
           audit.to_csv(out / 'target_arithmetic_qc.csv', index=False)
-
           print(json.dumps(payload, indent=2))
           PY
       - name: Import smoke test for audited Streamlit app
         run: |
           python -m py_compile analysis_pipeline.py component_pipeline.py streamlit_app_audited.py data/master160_embedded.py
+      - name: Start audited Streamlit app and verify health endpoint
+        run: |
+          set -euo pipefail
+          streamlit run streamlit_app_audited.py \
+            --server.headless true \
+            --server.address 127.0.0.1 \
+            --server.port 8501 \
+            > results/q1_component_validation/streamlit.log 2>&1 &
+          APP_PID=$!
+          cleanup() {
+            kill "$APP_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          healthy=0
+          for i in $(seq 1 60); do
+            if curl --fail --silent --show-error http://127.0.0.1:8501/_stcore/health | grep -qi 'ok'; then
+              healthy=1
+              break
+            fi
+            if ! kill -0 "$APP_PID" 2>/dev/null; then
+              echo 'Streamlit process exited before becoming healthy.'
+              cat results/q1_component_validation/streamlit.log
+              exit 1
+            fi
+            sleep 2
+          done
+
+          if [ "$healthy" -ne 1 ]; then
+            echo 'Streamlit health endpoint did not become ready within 120 seconds.'
+            cat results/q1_component_validation/streamlit.log
+            exit 1
+          fi
+
+          curl --fail --silent --show-error http://127.0.0.1:8501/ >/dev/null
+          echo 'Audited Streamlit app started successfully and passed the health check.'
       - name: Upload validation outputs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: q1-audited-component-validation
