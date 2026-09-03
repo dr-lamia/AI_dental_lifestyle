@@ -1,0 +1,119 @@
+name: Q1 audited component validation
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run audited component-specific validation
+        run: |
+          mkdir -p results/q1_component_validation
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          import pandas as pd
+
+          from analysis_pipeline import canonicalize, analysis_data
+          from component_pipeline import fit_all_components
+          from data.master160_embedded import load_master160
+
+          df = canonicalize(load_master160())
+          eligible, audit = analysis_data(df)
+          if len(df) != 160:
+              raise AssertionError(f'Expected 160 matched rows, found {len(df)}')
+          if int(audit['target_consistent'].sum()) != 160:
+              raise AssertionError('Not all 160 rows passed Elham arithmetic QC')
+
+          results = fit_all_components(df)
+          out = Path('results/q1_component_validation')
+          out.mkdir(parents=True, exist_ok=True)
+
+          rows = []
+          component_summary = {}
+          for target, result in results.items():
+              component_summary[target] = {
+                  'label': result.label,
+                  'n': result.n,
+                  'prevalence': result.prevalence,
+                  'mean_count': result.mean_count,
+                  'median_count': result.median_count,
+                  'max_count': result.max_count,
+                  'metrics': result.metrics,
+              }
+              for model, metrics in result.metrics.items():
+                  rows.append({'target': target, 'component': result.label, 'model': model, **metrics})
+              result.oof.to_csv(out / f'oof_{target}.csv', index=False)
+
+          payload = {
+              'n_source_rows': int(len(df)),
+              'n_qc_eligible': int(len(eligible)),
+              'n_qc_failed': int(len(df) - len(eligible)),
+              'components': component_summary,
+          }
+          with open(out / 'component_metrics.json', 'w', encoding='utf-8') as f:
+              json.dump(payload, f, indent=2)
+          pd.DataFrame(rows).to_csv(out / 'component_metrics.csv', index=False)
+          audit.to_csv(out / 'target_arithmetic_qc.csv', index=False)
+          print(json.dumps(payload, indent=2))
+          PY
+      - name: Import smoke test for audited Streamlit app
+        run: |
+          python -m py_compile analysis_pipeline.py component_pipeline.py streamlit_app_audited.py data/master160_embedded.py
+      - name: Start audited Streamlit app and verify health endpoint
+        run: |
+          set -euo pipefail
+          streamlit run streamlit_app_audited.py \
+            --server.headless true \
+            --server.address 127.0.0.1 \
+            --server.port 8501 \
+            > results/q1_component_validation/streamlit.log 2>&1 &
+          APP_PID=$!
+          cleanup() {
+            kill "$APP_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          healthy=0
+          for i in $(seq 1 60); do
+            if curl --fail --silent --show-error http://127.0.0.1:8501/_stcore/health | grep -qi 'ok'; then
+              healthy=1
+              break
+            fi
+            if ! kill -0 "$APP_PID" 2>/dev/null; then
+              echo 'Streamlit process exited before becoming healthy.'
+              cat results/q1_component_validation/streamlit.log
+              exit 1
+            fi
+            sleep 2
+          done
+
+          if [ "$healthy" -ne 1 ]; then
+            echo 'Streamlit health endpoint did not become ready within 120 seconds.'
+            cat results/q1_component_validation/streamlit.log
+            exit 1
+          fi
+
+          curl --fail --silent --show-error http://127.0.0.1:8501/ >/dev/null
+          echo 'Audited Streamlit app started successfully and passed the health check.'
+      - name: Upload validation outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: q1-audited-component-validation
+          path: results/q1_component_validation/
+          if-no-files-found: error
