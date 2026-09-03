@@ -6,7 +6,11 @@ cross-validated model performance into plain-language reliability indicators.
 """
 from __future__ import annotations
 
+import re
 import pandas as pd
+
+from clinical_guidelines import build_guideline_action_plan
+from patient_report_pdf import build_detailed_patient_pdf
 
 
 def _num(row, field):
@@ -56,6 +60,40 @@ def model_reliability(result, model_name: str):
         "level": "Still requires clinical confirmation",
         "note": "Performance is stronger but remains internally validated only.",
     }
+
+
+def _render_pdf_download(row: dict, concern_df: pd.DataFrame):
+    """Render one detailed PDF download button when running inside Streamlit."""
+    try:
+        import streamlit as st
+        from streamlit.runtime import exists as streamlit_runtime_exists
+
+        if not streamlit_runtime_exists():
+            return
+        priorities, modifiable, rec_df = build_guideline_action_plan(row, [])
+        pdf_bytes = build_detailed_patient_pdf(row, concern_df, priorities, modifiable, rec_df)
+        raw_id = str(row.get("id", "patient"))
+        file_id = re.sub(r"[^A-Za-z0-9_-]+", "_", raw_id).strip("_") or "patient"
+        st.download_button(
+            "Download detailed PDF report",
+            data=pdf_bytes,
+            file_name=f"Dental_AI_Coach_Report_{file_id}.pdf",
+            mime="application/pdf",
+            type="primary",
+            use_container_width=True,
+            key=f"download_pdf_report_{file_id}",
+            help="Includes the detailed Elham profile, concern map, relevant patient factors, clinical priorities, modifiable factors, phased guideline-based recommendations, and safety notes.",
+        )
+        st.caption(
+            "The PDF is a clinician-reviewable report based on recorded findings and guideline rules. "
+            "AI attribution remains supportive and non-causal."
+        )
+    except Exception as exc:
+        try:
+            import streamlit as st
+            st.warning(f"PDF report could not be generated: {exc}")
+        except Exception:
+            pass
 
 
 def clinical_concern_map(row: dict):
@@ -110,7 +148,9 @@ def clinical_concern_map(row: dict):
 
     order = {"High": 0, "Moderate": 1, "Low": 2}
     out = pd.DataFrame(domains)
-    return out.sort_values(["Concern", "Domain"], key=lambda s: s.map(order) if s.name == "Concern" else s).reset_index(drop=True)
+    out = out.sort_values(["Concern", "Domain"], key=lambda s: s.map(order) if s.name == "Concern" else s).reset_index(drop=True)
+    _render_pdf_download(row, out)
+    return out
 
 
 def recommendation_trigger_summary(row: dict, domain: str):
