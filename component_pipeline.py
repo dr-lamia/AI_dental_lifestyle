@@ -192,10 +192,12 @@ def fit_all_components(df: pd.DataFrame) -> Dict[str, ComponentResult]:
 
 
 def fit_component_for_app(df: pd.DataFrame, target: str) -> ComponentResult:
-    """Fit only final models for interactive deployment.
+    """Fast deployment path for the interactive app.
 
-    Validation metrics come from the cleaned-cohort five-fold GitHub Actions run.
-    This avoids repeating full cross-validation on every Streamlit cold start.
+    Validation metrics remain the fixed results from the audited five-fold analysis.
+    To minimize Streamlit cold-start time, the live app fits only the Random Forest
+    final model. XGBoost and blend results remain visible in the Validation tab as
+    prevalidated study metrics, but they are not retrained during a web-app startup.
     """
     if target not in MODELED_COMPONENTS:
         raise ValueError(f"Component is not configured for modeling: {target}")
@@ -209,15 +211,12 @@ def fit_component_for_app(df: pd.DataFrame, target: str) -> ComponentResult:
 
     rf_final = build_rf(X)
     rf_final.fit(X, y)
+
+    # Do not retrain XGBoost during Streamlit cold start. The research pipeline
+    # still fits/evaluates XGBoost and Blend in fit_component()/fit_all_components().
     xgb_final = None
-    if XGB_AVAILABLE:
-        xgb_final = build_xgb(X)
-        xgb_final.fit(X, y)
 
     score = dict(VALIDATED_METRICS[target])
-    if not XGB_AVAILABLE:
-        score.pop("XGBoost", None)
-        score.pop("Blend", None)
 
     return ComponentResult(
         target=target,
@@ -236,7 +235,7 @@ def fit_component_for_app(df: pd.DataFrame, target: str) -> ComponentResult:
 
 
 def fit_all_components_for_app(df: pd.DataFrame) -> Dict[str, ComponentResult]:
-    """Fast deployment path: final models only, prevalidated metrics displayed."""
+    """Fast deployment path: fit RF final models only; use stored validation metrics."""
     return {target: fit_component_for_app(df, target) for target in MODELED_COMPONENTS}
 
 
